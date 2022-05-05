@@ -235,3 +235,6 @@ lcov*.info
 
 # /wasm/
 /wasm/tests/*.wasm
+
+# WASM Build
+ruby-wasm32-wasi/**

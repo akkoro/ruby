@@ -1,4 +1,11 @@
+#ifndef ASSEMBLYLIFT_H
+#define ASSEMBLYLIFT_H
+
 #include <stdint.h>
+#include <math.h>
+
+#define IO_BUFFER_SIZE_BYTES 32768
+#define FUNCTION_INPUT_BUFFER_SIZE_BYTES 8192
 
 // IO
 __attribute__((import_module("env"), import_name("__asml_abi_io_poll"))) 
@@ -27,3 +34,5 @@ __attribute__((import_module("env"), import_name("__asml_abi_input_next")))
 extern int32_t __asml_abi_input_next();
 __attribute__((import_module("env"), import_name("__asml_abi_input_length_get"))) 
 extern uint64_t __asml_abi_input_length_get();
+
+#endif

@@ -46,6 +46,33 @@ rb_asml_get_function_input(VALUE self) {
     return str;
 }
 
+VALUE
+rb_asml_get_io_document(VALUE self, VALUE id) {
+    int ioid = NUM2INT(id);
+    if (__asml_abi_io_poll(ioid) == 1) {
+        size_t input_len = __asml_abi_io_len(ioid);
+        size_t bytes_read = 0;
+
+        VALUE str = rb_str_buf_new(input_len);
+        rb_encoding* enc = rb_utf8_encoding();
+        rb_enc_associate(str, enc);
+
+        __asml_abi_io_load(ioid);
+        while (bytes_read < input_len) {
+            size_t read_len = fmin(input_len, IO_BUFFER_SIZE_BYTES);
+            rb_str_cat(str, IO_BUFFER, read_len);
+            bytes_read += read_len;
+            if (bytes_read % IO_BUFFER_SIZE_BYTES == 0) {
+                __asml_abi_io_next();
+            }
+        }
+
+        return str;
+    }
+
+    return Qnil;
+}
+
 void
 Init_asml(void)
 {
@@ -54,6 +81,7 @@ Init_asml(void)
     rb_define_singleton_method(rb_cAsml, "success", rb_asml_runtime_success, 1);
     
     rb_define_singleton_method(rb_cAsml, "get_function_input", rb_asml_get_function_input, 0);
+    rb_define_singleton_method(rb_cAsml, "get_io_document", rb_asml_get_io_document, 1);
 }
 
 __attribute__((export_name("__asml_guest_get_function_input_buffer_pointer"))) 

@@ -16,6 +16,8 @@ __attribute__((import_module("env"), import_name("__asml_abi_io_load")))
 extern int32_t __asml_abi_io_load(uint32_t id);
 __attribute__((import_module("env"), import_name("__asml_abi_io_next"))) 
 extern int32_t __asml_abi_io_next();
+__attribute__((import_module("env"), import_name("__asml_abi_io_invoke"))) 
+extern int32_t __asml_abi_io_invoke(uint8_t* method_ptr, uint32_t method_len, uint8_t* input_ptr, uint32_t input_len);
 
 // System clock
 __attribute__((import_module("env"), import_name("__asml_abi_clock_time_get"))) 

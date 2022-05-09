@@ -73,6 +73,19 @@ rb_asml_get_io_document(VALUE self, VALUE id) {
     return Qnil;
 }
 
+VALUE
+rb_asml_iomod_invoke(VALUE self, VALUE method, VALUE input) {
+    if (RB_TYPE_P(method, T_STRING) == 1) {
+        return INT2NUM(__asml_abi_io_invoke(
+            (uint8_t*) RSTRING_PTR(method), 
+            (uint32_t) RSTRING_LEN(method),
+            (uint8_t*) RSTRING_PTR(input), 
+            (uint32_t) RSTRING_LEN(input)
+        ));
+    }
+    return INT2NUM(-1);
+}
+
 void
 Init_asml(void)
 {
@@ -82,6 +95,8 @@ Init_asml(void)
     
     rb_define_singleton_method(rb_cAsml, "get_function_input", rb_asml_get_function_input, 0);
     rb_define_singleton_method(rb_cAsml, "get_io_document", rb_asml_get_io_document, 1);
+
+    rb_define_singleton_method(rb_cAsml, "iomod_invoke", rb_asml_iomod_invoke, 2);
 }
 
 __attribute__((export_name("__asml_guest_get_function_input_buffer_pointer"))) 

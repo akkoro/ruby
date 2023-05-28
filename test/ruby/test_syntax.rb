@@ -66,6 +66,15 @@ class TestSyntax < Test::Unit::TestCase
     f&.close!
   end
 
+  def test_script_lines_encoding
+    require 'tmpdir'
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "script_lines.rb"), "SCRIPT_LINES__ = {}\n")
+      assert_in_out_err(%w"-r./script_lines -w -Ke", "puts __ENCODING__.name",
+                        %w"EUC-JP", /-K is specified/, chdir: dir)
+    end
+  end
+
   def test_anonymous_block_forwarding
     assert_syntax_error("def b; c(&); end", /no anonymous block parameter/)
     assert_separately([], "#{<<-"begin;"}\n#{<<-'end;'}")
@@ -154,10 +163,20 @@ class TestSyntax < Test::Unit::TestCase
         def c(**kw); kw end
         def d(**); b(k: 1, **) end
         def e(**); b(**, k: 1) end
+        def f(a: nil, **); b(**) end
         assert_equal({a: 1, k: 3}, b(a: 1, k: 3))
         assert_equal({a: 1, k: 3}, d(a: 1, k: 3))
         assert_equal({a: 1, k: 1}, e(a: 1, k: 3))
+        assert_equal({k: 3}, f(a: 1, k: 3))
     end;
+  end
+
+  def test_argument_forwarding_with_anon_rest_kwrest_and_block
+    assert_syntax_error("def f(*, **, &); g(...); end", /unexpected \.\.\./)
+    assert_syntax_error("def f(...); g(*); end", /no anonymous rest parameter/)
+    assert_syntax_error("def f(...); g(0, *); end", /no anonymous rest parameter/)
+    assert_syntax_error("def f(...); g(**); end", /no anonymous keyword rest parameter/)
+    assert_syntax_error("def f(...); g(x: 1, **); end", /no anonymous keyword rest parameter/)
   end
 
   def test_newline_in_block_parameters
@@ -971,7 +990,7 @@ eom
      ["p ", ""],                # no-pop
      ["", "p Foo::Bar"],        # pop
     ].each do |p1, p2|
-      src = <<-EOM.gsub(/^\s*\n/, '')
+      src = <<~EOM
       class Foo
         #{"Bar = " + preset if preset}
       end
@@ -1003,7 +1022,7 @@ eom
      ["p ", ""],                # no-pop
      ["", "p ::Bar"],           # pop
     ].each do |p1, p2|
-      src = <<-EOM.gsub(/^\s*\n/, '')
+      src = <<~EOM
       #{"Bar = " + preset if preset}
       class Foo
         #{p1}::Bar #{op}= 42
@@ -1651,6 +1670,9 @@ eom
         assert_raise(NameError) {eval("_1")},
       ]
     }
+
+    assert_valid_syntax("proc {def foo(_);end;_1}")
+    assert_valid_syntax("p { [_1 **2] }")
   end
 
   def test_value_expr_in_condition
@@ -1698,6 +1720,8 @@ eom
     assert_syntax_error('def foo(...) foo[...] = x; end', /unexpected/)
     assert_syntax_error('def foo(...) foo(...) { }; end', /both block arg and actual block given/)
     assert_syntax_error('def foo(...) defined?(...); end', /unexpected/)
+    assert_syntax_error('def foo(*rest, ...) end', '... after rest argument')
+    assert_syntax_error('def foo(*, ...) end', '... after rest argument')
 
     obj1 = Object.new
     def obj1.bar(*args, **kws, &block)
@@ -1896,6 +1920,21 @@ eom
 
     exp = eval("-> (a: nil) {a...1}")
     assert_equal 0...1, exp.call(a: 0)
+  end
+
+  def test_class_module_Object_ancestors
+    assert_separately([], <<-RUBY)
+      m = Module.new
+      m::Bug18832 = 1
+      include m
+      class Bug18832; end
+    RUBY
+    assert_separately([], <<-RUBY)
+      m = Module.new
+      m::Bug18832 = 1
+      include m
+      module Bug18832; end
+    RUBY
   end
 
   def test_cdhash

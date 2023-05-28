@@ -185,7 +185,7 @@ class ExtLibs
     extracted = false
     dest = File.dirname(list)
     url = chksums = nil
-    IO.foreach(list) do |line|
+    File.foreach(list) do |line|
       line.sub!(/\s*#.*/, '')
       if /^(\w+)\s*=\s*(.*)/ =~ line
         vars[$1] = vars.expand($2)
@@ -227,7 +227,7 @@ class ExtLibs
       begin
         extracted = do_command(mode, dest, url, cache_dir, chksums)
       rescue => e
-        warn e.full_message
+        warn defined?(e.full_message) ? e.full_message : e.message
         success = false
       end
       url = chksums = nil

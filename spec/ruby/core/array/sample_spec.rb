@@ -3,16 +3,14 @@ require_relative 'fixtures/classes'
 
 describe "Array#sample" do
   it "samples evenly" do
-    ary = [0, 1, 2, 3]
-    3.times do |i|
-      counts = [0, 0, 0, 0]
-      4000.times do
-        counts[ary.sample(3)[i]] += 1
-      end
-      counts.each do |count|
-        (800..1200).should include(count)
-      end
-    end
+    ArraySpecs.measure_sample_fairness(4, 1, 400)
+    ArraySpecs.measure_sample_fairness(4, 2, 400)
+    ArraySpecs.measure_sample_fairness(4, 3, 400)
+    ArraySpecs.measure_sample_fairness(40, 3, 400)
+    ArraySpecs.measure_sample_fairness(40, 4, 400)
+    ArraySpecs.measure_sample_fairness(40, 8, 400)
+    ArraySpecs.measure_sample_fairness(40, 16, 400)
+    ArraySpecs.measure_sample_fairness_large_sample_size(100, 80, 4000)
   end
 
   it "returns nil for an empty Array" do
@@ -29,6 +27,10 @@ describe "Array#sample" do
 
   it "returns a single value when not passed a count and a Random is given" do
     [4].sample(random: Random.new(42)).should equal(4)
+  end
+
+  it "returns a single value when not passed a count and a Random class is given" do
+    [4].sample(random: Random).should equal(4)
   end
 
   it "returns an empty Array when passed zero" do

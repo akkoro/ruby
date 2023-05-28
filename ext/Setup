@@ -6,7 +6,6 @@
 #continuation
 #coverage
 #date
-#dbm
 #digest/bubblebabble
 #digest
 #digest/md5
@@ -15,9 +14,7 @@
 #digest/sha2
 #etc
 #fcntl
-#fiber
 #fiddle
-#gdbm
 #io/console
 #io/nonblock
 #io/wait

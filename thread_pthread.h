@@ -26,13 +26,9 @@ struct rb_thread_sched_item {
 };
 
 struct rb_native_thread {
-    int id;
+    rb_atomic_t serial;
 
     rb_nativethread_id_t thread_id;
-
-#ifdef NON_SCALAR_THREAD_ID
-    rb_thread_id_string_t thread_id_string;
-#endif
 
 #ifdef RB_THREAD_T_HAS_NATIVE_ID
     int tid;
@@ -54,6 +50,10 @@ struct rb_native_thread {
         rb_nativethread_cond_t intr; /* th->interrupt_lock */
         rb_nativethread_cond_t readyq; /* use sched->lock */
     } cond;
+
+#ifdef USE_SIGALTSTACK
+    void *altstack;
+#endif
 };
 
 #undef except
@@ -90,23 +90,27 @@ struct rb_thread_sched {
     int wait_yield;
 };
 
-#if __STDC_VERSION__ >= 201112
-  #define RB_THREAD_LOCAL_SPECIFIER _Thread_local
-#elif defined(__GNUC__)
-  /* note that ICC (linux) and Clang are covered by __GNUC__ */
-  #define RB_THREAD_LOCAL_SPECIFIER __thread
-#else
+RUBY_SYMBOL_EXPORT_BEGIN
+#ifdef RB_THREAD_LOCAL_SPECIFIER
+  # ifdef __APPLE__
+    // on Darwin, TLS can not be accessed across .so
+    struct rb_execution_context_struct *rb_current_ec(void);
+    void rb_current_ec_set(struct rb_execution_context_struct *);
+  # else
+    RUBY_EXTERN RB_THREAD_LOCAL_SPECIFIER struct rb_execution_context_struct *ruby_current_ec;
 
+    // for RUBY_DEBUG_LOG()
+    RUBY_EXTERN RB_THREAD_LOCAL_SPECIFIER rb_atomic_t ruby_nt_serial;
+    #define RUBY_NT_SERIAL 1
+  # endif
+#else
 typedef pthread_key_t native_tls_key_t;
 
 static inline void *
 native_tls_get(native_tls_key_t key)
 {
-    void *ptr = pthread_getspecific(key);
-    if (UNLIKELY(ptr == NULL)) {
-        rb_bug("pthread_getspecific returns NULL");
-    }
-    return ptr;
+    // return value should be checked by caller
+    return pthread_getspecific(key);
 }
 
 static inline void
@@ -116,19 +120,8 @@ native_tls_set(native_tls_key_t key, void *ptr)
         rb_bug("pthread_setspecific error");
     }
 }
-#endif
 
-RUBY_SYMBOL_EXPORT_BEGIN
-#ifdef RB_THREAD_LOCAL_SPECIFIER
-  #ifdef __APPLE__
-    // on Darwin, TLS can not be accessed across .so
-    struct rb_execution_context_struct *rb_current_ec(void);
-    void rb_current_ec_set(struct rb_execution_context_struct *);
-  #else
-    RUBY_EXTERN RB_THREAD_LOCAL_SPECIFIER struct rb_execution_context_struct *ruby_current_ec;
-  #endif
-#else
-  RUBY_EXTERN native_tls_key_t ruby_current_ec_key;
+RUBY_EXTERN native_tls_key_t ruby_current_ec_key;
 #endif
 RUBY_SYMBOL_EXPORT_END
 

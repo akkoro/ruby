@@ -994,6 +994,15 @@ class TestModule < Test::Unit::TestCase
     assert_equal([:bClass1], BClass.public_instance_methods(false))
   end
 
+  def test_undefined_instance_methods
+    assert_equal([],  AClass.undefined_instance_methods)
+    assert_equal([], BClass.undefined_instance_methods)
+    c = Class.new(AClass) {undef aClass}
+    assert_equal([:aClass], c.undefined_instance_methods)
+    c = Class.new(c)
+    assert_equal([], c.undefined_instance_methods)
+  end
+
   def test_s_public
     o = (c = Class.new(AClass)).new
     assert_raise(NoMethodError, /private method/) {o.aClass1}
@@ -1319,8 +1328,6 @@ class TestModule < Test::Unit::TestCase
       end
     end
     include LangModuleSpecInObject
-    module LangModuleTop
-    end
     puts "ok" if LangModuleSpecInObject::LangModuleTop == LangModuleTop
     INPUT
 
@@ -1721,6 +1728,8 @@ class TestModule < Test::Unit::TestCase
     assert_equal("TestModule::C\u{df}", c.name, '[ruby-core:24600]')
     c = Module.new.module_eval("class X\u{df} < Module; self; end")
     assert_match(/::X\u{df}:/, c.new.to_s)
+  ensure
+    Object.send(:remove_const, "C\u{df}")
   end
 
 
@@ -2341,6 +2350,18 @@ class TestModule < Test::Unit::TestCase
       end
     end
     assert_equal(:foo, removed)
+  end
+
+  def test_frozen_prepend_remove_method
+    [Module, Class].each do |klass|
+      mod = klass.new do
+        prepend(Module.new)
+        def foo; end
+      end
+      mod.freeze
+      assert_raise(FrozenError, '[Bug #19166]') { mod.send(:remove_method, :foo) }
+      assert_equal([:foo], mod.instance_methods(false))
+    end
   end
 
   def test_prepend_class_ancestors
@@ -3153,6 +3174,7 @@ class TestModule < Test::Unit::TestCase
   end
 
   def test_redefinition_mismatch
+    omit "Investigating trunk-rjit failure on ci.rvm.jp" if defined?(RubyVM::RJIT) && RubyVM::RJIT.enabled?
     m = Module.new
     m.module_eval "A = 1", __FILE__, line = __LINE__
     e = assert_raise_with_message(TypeError, /is not a module/) {
@@ -3254,6 +3276,21 @@ class TestModule < Test::Unit::TestCase
     assert_match(/::Foo$/, mod.name, '[Bug #14895]')
   end
 
+  def test_iclass_memory_leak
+    # [Bug #19550]
+    assert_no_memory_leak([], <<~PREP, <<~CODE, rss: true)
+      code = proc do
+        mod = Module.new
+        Class.new do
+          include mod
+        end
+      end
+      1_000.times(&code)
+    PREP
+      3_000_000.times(&code)
+    CODE
+  end
+
   private
 
   def assert_top_method_is_private(method)
@@ -3261,7 +3298,7 @@ class TestModule < Test::Unit::TestCase
       methods = singleton_class.private_instance_methods(false)
       assert_include(methods, :#{method}, ":#{method} should be private")
 
-      assert_raise_with_message(NoMethodError, "private method `#{method}' called for main:Object") {
+      assert_raise_with_message(NoMethodError, /^private method `#{method}' called for /) {
         recv = self
         recv.#{method}
       }

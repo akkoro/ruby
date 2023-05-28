@@ -161,6 +161,18 @@ describe "A Proc" do
     end
   end
 
+  describe "taking |*a, b| arguments" do
+    it "assigns [] to the argument when passed no values" do
+      proc { |*a, b| [a, b] }.call.should == [[], nil]
+    end
+  end
+
+  describe "taking |a, *b, c| arguments" do
+    it "assigns [] to the argument when passed no values" do
+      proc { |a, *b, c| [a, b, c] }.call.should == [nil, [], nil]
+    end
+  end
+
   describe "taking |a, | arguments" do
     before :each do
       @l = lambda { |a, | a }
@@ -235,6 +247,13 @@ describe "A Proc" do
       it 'does not autosplat keyword arguments' do
         @p.call([1, {a: 1}]).should == [[[1, {a: 1}]], {}]
       end
+    end
+  end
+
+  describe "taking |required keyword arguments, **kw| arguments" do
+    it "raises ArgumentError for missing required argument" do
+      p = proc { |a:, **kw| [a, kw] }
+      -> { p.call() }.should raise_error(ArgumentError)
     end
   end
 end

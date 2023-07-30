@@ -10,6 +10,7 @@
 #include "assemblylift.h"
 #include "jwt.h"
 #include "opa.h"
+#include "opa_policy.h"
 #include "secrets.h"
 
 #endif

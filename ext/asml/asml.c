@@ -3,7 +3,7 @@
 VALUE rb_mAsmlRt;
 VALUE rb_mAsmlIo;
 VALUE rb_mAsmlOpa;
-VALUE rbPolicyStruct;
+VALUE rb_cAsmlOpaPolicy;
 
 void c_bytes_from_value(VALUE bytes, uint8_t **ret, size_t *len) {
     Check_Type(bytes, T_ARRAY);
@@ -122,15 +122,25 @@ static VALUE rb_asml_opa_new_policy(VALUE self, VALUE bytes) {
         } else {
             VALUE args[1];
             args[0] = rb_str_new(policy.id.ptr, policy.id.len);
-            return rb_class_new_instance(1, args, rbPolicyStruct);
+            return rb_class_new_instance(1, args, rb_cAsmlOpaPolicy);
         }
     }
     rb_raise(rb_eRuntimeError, "opa policy error: could not read bytes");
     return Qnil;
 }
 
-static VALUE rb_asml_opa_eval(VALUE self, VALUE id, VALUE data, VALUE input) {
-    return Qnil;
+static VALUE rb_asml_opa_eval(VALUE self, VALUE id_s, VALUE data_s, VALUE input_s) {
+    Check_Type(id_s, T_STRING);
+    Check_Type(data_s, T_STRING);
+    Check_Type(input_s, T_STRING);
+
+    opa_string_t id = { .ptr = RSTRING_PTR(id_s), .len = RSTRING_LEN(id_s) };
+    opa_string_t data = { .ptr = RSTRING_PTR(data_s), .len = RSTRING_LEN(data_s) };
+    opa_string_t input = { .ptr = RSTRING_PTR(input_s), .len = RSTRING_LEN(input_s) };
+
+    opa_string_t ret = {0};
+    akkoro_opa_module_eval(&id, &data, &input, &ret);
+    return rb_str_new(ret.ptr, ret.len);
 }
 
 void Init_asml(void)
@@ -153,8 +163,8 @@ void Init_asml(void)
     rb_define_singleton_method(rb_mAsmlOpa, "new_policy", rb_asml_opa_new_policy, 1);
     rb_define_singleton_method(rb_mAsmlOpa, "eval", rb_asml_opa_eval, 3);
 
-    rbPolicyStruct = rb_define_class_under(rb_mAsmlOpa, "Policy", rb_cObject);
-    rb_define_alloc_func(rbPolicyStruct, rb_asml_opa_policy_alloc);
-    rb_define_method(rbPolicyStruct, "initialize", rb_asml_opa_policy_init, 1);
-    rb_define_method(rbPolicyStruct, "id", rb_asml_opa_policy_id, 0);
+    rb_cAsmlOpaPolicy = rb_define_class_under(rb_mAsmlOpa, "Policy", rb_cObject);
+    rb_define_alloc_func(rb_cAsmlOpaPolicy, rb_asml_opa_policy_alloc);
+    rb_define_method(rb_cAsmlOpaPolicy, "initialize", rb_asml_opa_policy_init, 1);
+    rb_define_method(rb_cAsmlOpaPolicy, "id", rb_asml_opa_policy_id, 0);
 }

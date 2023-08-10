@@ -1,3 +1,13 @@
+# Regression test for yielding with autosplat to block with
+# optional parameters. https://github.com/Shopify/yjit/issues/313
+assert_equal '[:a, :b, :a, :b]', %q{
+  def yielder(arg) = yield(arg) + yield(arg)
+
+  yielder([:a, :b]) do |c = :c, d = :d|
+    [c, d]
+  end
+}
+
 # Regression test for GC mishap while doing shape transition
 assert_equal '[:ok]', %q{
   # [Bug #19601]
@@ -1088,6 +1098,18 @@ assert_equal '[42, :default]', %q{
     index(h, 0),
     index(h, 1)
   ]
+}
+
+# Test default value block for Hash with opt_aref_with
+assert_equal "false", %q{
+  def index_with_string(h)
+    h["foo"]
+  end
+
+  h = Hash.new { |h, k| k.frozen? }
+
+  index_with_string(h)
+  index_with_string(h)
 }
 
 # A regression test for making sure cfp->sp is proper when
@@ -2252,6 +2274,17 @@ assert_equal '[1, 2, nil]', %q{
 
   expandarray_rhs_too_small
   expandarray_rhs_too_small
+}
+
+assert_equal '[nil, 2, nil]', %q{
+  def foo(arr)
+    a, b, c = arr
+  end
+
+  a, b, c1 = foo([0, 1])
+  a, b, c2 = foo([0, 1, 2])
+  a, b, c3 = foo([0, 1])
+  [c1, c2, c3]
 }
 
 assert_equal '[1, [2]]', %q{
@@ -3963,3 +3996,33 @@ assert_equal 'true', %q{
     true
   end
 } unless defined?(RubyVM::RJIT) && RubyVM::RJIT.enabled? # Not yet working on RJIT
+
+# Regresssion test: register allocator on expandarray
+assert_equal '[]', %q{
+  func = proc { [] }
+  proc do
+    _x, _y = func.call
+  end.call
+}
+
+# Catch TAG_BREAK in a non-FINISH frame with JIT code
+assert_equal '1', %q{
+  def entry
+    catch_break
+  end
+
+  def catch_break
+    while_true do
+      break
+    end
+    1
+  end
+
+  def while_true
+    while true
+      yield
+    end
+  end
+
+  entry
+}

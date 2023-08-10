@@ -34,7 +34,6 @@ module SyncDefaultGems
     irb: 'ruby/irb',
     forwardable: "ruby/forwardable",
     mutex_m: "ruby/mutex_m",
-    racc: "ruby/racc",
     singleton: "ruby/singleton",
     open3: "ruby/open3",
     getoptlong: "ruby/getoptlong",
@@ -81,6 +80,7 @@ module SyncDefaultGems
     syntax_suggest: ["ruby/syntax_suggest", "main"],
     un: "ruby/un",
     win32ole: "ruby/win32ole",
+    yarp: ["ruby/yarp", "main"],
   }
 
   CLASSICAL_DEFAULT_BRANCH = "master"
@@ -153,10 +153,9 @@ module SyncDefaultGems
       File.write("lib/bundler/bundler.gemspec", gemspec_content)
 
       cp_r("#{upstream}/bundler/spec", "spec/bundler")
-      cp_r(Dir.glob("#{upstream}/bundler/tool/bundler/dev_gems*"), "tool/bundler")
-      cp_r(Dir.glob("#{upstream}/bundler/tool/bundler/test_gems*"), "tool/bundler")
-      cp_r(Dir.glob("#{upstream}/bundler/tool/bundler/rubocop_gems*"), "tool/bundler")
-      cp_r(Dir.glob("#{upstream}/bundler/tool/bundler/standard_gems*"), "tool/bundler")
+      %w[dev_gems test_gems rubocop_gems standard_gems].each do |gemfile|
+        cp_r("#{upstream}/tool/bundler/#{gemfile}.rb", "tool/bundler")
+      end
       rm_rf Dir.glob("spec/bundler/support/artifice/{vcr_cassettes,used_cassettes.txt}")
       rm_rf Dir.glob("lib/{bundler,rubygems}/**/{COPYING,LICENSE,README}{,.{md,txt,rdoc}}")
     when "rdoc"
@@ -287,25 +286,6 @@ module SyncDefaultGems
       cp_r("#{upstream}/strscan.gemspec", "ext/strscan")
       rm_rf(%w["ext/strscan/regenc.h ext/strscan/regint.h"])
       `git checkout ext/strscan/depend`
-    when "racc"
-      rm_rf(%w[lib/racc lib/racc.rb ext/racc test/racc])
-      parser_files = %w[
-        lib/racc/parser-text.rb
-      ]
-      Dir.chdir(upstream) do
-        `bundle install`
-        parser_files.each do |file|
-          `bundle exec rake #{file}`
-        end
-      end
-      cp_r(Dir.glob("#{upstream}/lib/racc*"), "lib")
-      mkdir_p("ext/racc/cparse")
-      cp_r(Dir.glob("#{upstream}/ext/racc/cparse/*"), "ext/racc/cparse")
-      cp_r("#{upstream}/test", "test/racc")
-      cp_r("#{upstream}/racc.gemspec", "lib/racc")
-      rm_rf("test/racc/lib")
-      rm_rf("lib/racc/cparse-jruby.jar")
-      `git checkout ext/racc/cparse/README ext/racc/cparse/depend`
     when "cgi"
       rm_rf(%w[lib/cgi.rb lib/cgi ext/cgi test/cgi])
       cp_r("#{upstream}/ext/cgi", "ext")
@@ -416,6 +396,35 @@ module SyncDefaultGems
       rm_rf(%w[spec/syntax_suggest libexec/syntax_suggest])
       cp_r("#{upstream}/spec", "spec/syntax_suggest")
       cp_r("#{upstream}/exe/syntax_suggest", "libexec/syntax_suggest")
+    when "yarp"
+      # We don't want to remove yarp_init.c, so we temporarily move it
+      # out of the yarp dir, wipe the yarp dir, and then put it back
+      mv("yarp/yarp_init.c", ".") if File.exist? "yarp/yarp_init.c"
+      rm_rf(%w[test/yarp yarp])
+
+      # Run the YARP templating scripts
+      system("ruby #{upstream}/templates/template.rb")
+      cp_r("#{upstream}/ext/yarp", "yarp")
+      cp_r("#{upstream}/lib/.", "lib")
+      cp_r("#{upstream}/test", "test/yarp")
+      cp_r("#{upstream}/src/.", "yarp")
+
+      # Move all files in enc to be prefixed with yp_ in order
+      # to deconflict them from non-yarp enc files
+      (Dir.entries("yarp/enc/") - ["..", "."]).each do |f|
+        next if f.start_with?("yp_")
+        mv "yarp/enc/#{f}", "yarp/enc/yp_#{f}"
+      end
+
+      cp_r("#{upstream}/yarp.gemspec", "lib/yarp")
+      cp_r("#{upstream}/include/yarp/.", "yarp")
+      cp_r("#{upstream}/include/yarp.h", "yarp")
+
+      rm("yarp/config.h")
+      File.write("yarp/config.h", "#include \"ruby/config.h\"\n")
+      rm("yarp/extconf.rb")
+
+      mv("yarp_init.c", "yarp/")
     else
       sync_lib gem, upstream
     end
@@ -428,13 +437,14 @@ module SyncDefaultGems
     |\.git.*
     |[A-Z]\w+file
     |COPYING
-    |\Arakelib\/.*
-    |\Atest\/lib\/.*
+    |rakelib\/.*
+    |test\/lib\/.*
     )\z/mx
 
   def message_filter(repo, sha, input: ARGF)
     log = input.read
     log.delete!("\r")
+    log << "\n" if !log.end_with?("\n")
     repo_url = "https://github.com/#{repo}"
     subject, log = log.split(/\n(?:[ \t]*(?:\n|\z))/, 2)
     conv = proc do |s|
@@ -577,16 +587,32 @@ module SyncDefaultGems
         next
       end
 
-      tools = pipe_readlines(%W"git diff --name-only -z HEAD~..HEAD -- test/lib/ tool/ rakelib/")
+      changed = pipe_readlines(%W"git diff --name-only -z HEAD~..HEAD --")
+      toplevels = changed.map {|f| f[%r[\A(?!tool/)[^/]+/?]]}.compact
+      toplevels.delete_if do |top|
+        if system(*%w"git checkout -f HEAD~ --", top, err: File::NULL)
+          # previously existent path
+          system(*%w"git checkout -f HEAD --", top, out: File::NULL)
+          true
+        end
+      end
+      unless toplevels.empty?
+        puts "Remove files added to toplevel: #{toplevels.join(', ')}"
+        system(*%w"git rm -r --", *toplevels)
+      end
+      tools = changed.select {|f|f.start_with?("test/lib/", "tool/")}
       unless tools.empty?
-        system(*%W"git rm --", *tools)
+        system(*%W"git rm -r --", *tools)
         system(*%W"git checkout HEAD~ --", *tools)
+      end
+      unless toplevels.empty? and tools.empty?
+        clean = toplevels + tools
         if system(*%W"git diff --quiet HEAD~")
           `git reset HEAD~ --` && `git checkout .` && `git clean -fd`
-          puts "Skip commit #{sha} only for tools"
+          puts "Skip commit #{sha} only for tools or toplevel"
           next
         end
-        unless system(*%W"git commit --amend --no-edit --", *tools)
+        unless system(*%W"git commit --amend --no-edit --", *clean)
           failed_commits << sha
           `git reset HEAD~ --` && `git checkout .` && `git clean -fd`
           puts "Failed to pick #{sha}"

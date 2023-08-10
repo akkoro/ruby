@@ -2,6 +2,7 @@
 
 require "stringio"
 require_relative "nop"
+require_relative "../pager"
 
 module IRB
   # :stopdoc:
@@ -14,7 +15,7 @@ module IRB
       def execute(*args)
         commands_info = IRB::ExtendCommandBundle.all_commands_info
         commands_grouped_by_categories = commands_info.group_by { |cmd| cmd[:category] }
-        longest_cmd_name_length = commands_info.map { |c| c[:display_name] }.max { |a, b| a.length <=> b.length }.length
+        longest_cmd_name_length = commands_info.map { |c| c[:display_name].length }.max
 
         output = StringIO.new
 
@@ -28,9 +29,7 @@ module IRB
           output.puts
         end
 
-        puts output.string
-
-        nil
+        Pager.page_content(output.string)
       end
     end
   end

@@ -2165,6 +2165,10 @@ rb_class_superclass(VALUE klass)
         if (klass == rb_cBasicObject) return Qnil;
         rb_raise(rb_eTypeError, "uninitialized class");
     }
+
+    if (!RCLASS_SUPERCLASS_DEPTH(klass)) {
+        return Qnil;
+    }
     else {
         super = RCLASS_SUPERCLASSES(klass)[RCLASS_SUPERCLASS_DEPTH(klass) - 1];
         RUBY_ASSERT(RB_TYPE_P(klass, T_CLASS));
@@ -4508,6 +4512,7 @@ InitVM_Object(void)
     rb_define_method(rb_cModule, "included_modules", rb_mod_included_modules, 0); /* in class.c */
     rb_define_method(rb_cModule, "include?", rb_mod_include_p, 1); /* in class.c */
     rb_define_method(rb_cModule, "name", rb_mod_name, 0);  /* in variable.c */
+    rb_define_method(rb_cModule, "set_temporary_name", rb_mod_set_temporary_name, 1);  /* in variable.c */
     rb_define_method(rb_cModule, "ancestors", rb_mod_ancestors, 0); /* in class.c */
 
     rb_define_method(rb_cModule, "attr", rb_mod_attr, -1);

@@ -81,7 +81,7 @@ git clone https://github.com/ruby/ruby yjit
 cd yjit
 ```
 
-The YJIT `ruby` binary can be built with either GCC or Clang. It can be built either in dev (debug) mode or in release mode. For maximum performance, compile YJIT in release mode with GCC. More detailed build instructions are provided in the [Ruby README](https://github.com/ruby/ruby#how-to-compile-and-install).
+The YJIT `ruby` binary can be built with either GCC or Clang. It can be built either in dev (debug) mode or in release mode. For maximum performance, compile YJIT in release mode with GCC. More detailed build instructions are provided in the [Ruby README](https://github.com/ruby/ruby#how-to-build).
 
 ```sh
 # Configure in release mode for maximum performance, build and install
@@ -216,7 +216,7 @@ irb(main):001:0> RubyVM::YJIT.runtime_stats
 {:inline_code_size=>340745,
  :outlined_code_size=>297664,
  :all_stats=>true,
- :exec_instruction=>1547816,
+ :yjit_insns_count=>1547816,
  :send_callsite_not_simple=>7267,
  :send_kw_splat=>7,
  :send_ivar_set_method=>72,
@@ -225,8 +225,7 @@ irb(main):001:0> RubyVM::YJIT.runtime_stats
 
 Some of the counters include:
 
-:exec_instruction - how many Ruby bytecode instructions have been executed
-:yjit_insns_count - how many Ruby bytecode instruction have been executed in compiled code
+:yjit_insns_count - how many Ruby bytecode instructions have been executed
 :binding_allocations - number of bindings allocated
 :binding_set - number of variables set via a binding
 :code_gc_count - number of garbage collections of compiled code since process start

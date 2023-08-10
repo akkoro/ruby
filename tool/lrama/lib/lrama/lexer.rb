@@ -1,57 +1,11 @@
 require "strscan"
-require "lrama/report"
+require "lrama/report/duration"
+require "lrama/lexer/token"
 
 module Lrama
   # Lexer for parse.y
   class Lexer
     include Lrama::Report::Duration
-
-    # s_value is semantic value
-    Token = Struct.new(:type, :s_value, keyword_init: true) do
-      Type = Struct.new(:id, :name, keyword_init: true)
-
-      attr_accessor :line, :column, :referred
-      # For User_code
-      attr_accessor :references
-
-      def to_s
-        "#{super} line: #{line}, column: #{column}"
-      end
-
-      @i = 0
-      @types = []
-
-      def self.define_type(name)
-        type = Type.new(id: @i, name: name.to_s)
-        const_set(name, type)
-        @types << type
-        @i += 1
-      end
-
-      # Token types
-      define_type(:P_expect)         # %expect
-      define_type(:P_define)         # %define
-      define_type(:P_printer)        # %printer
-      define_type(:P_lex_param)      # %lex-param
-      define_type(:P_parse_param)    # %parse-param
-      define_type(:P_initial_action) # %initial-action
-      define_type(:P_union)          # %union
-      define_type(:P_token)          # %token
-      define_type(:P_type)           # %type
-      define_type(:P_nonassoc)       # %nonassoc
-      define_type(:P_left)           # %left
-      define_type(:P_right)          # %right
-      define_type(:P_prec)           # %prec
-      define_type(:User_code)        # { ... }
-      define_type(:Tag)              # <int>
-      define_type(:Number)           # 0
-      define_type(:Ident_Colon)      # k_if:, k_if  : (spaces can be there)
-      define_type(:Ident)            # api.pure, tNUMBER
-      define_type(:Semicolon)        # ;
-      define_type(:Bar)              # |
-      define_type(:String)           # "str"
-      define_type(:Char)             # '+'
-    end
 
     # States
     #
@@ -166,16 +120,23 @@ module Lrama
           tokens << create_token(Token::Number, Integer(ss[0]), line, ss.pos - column)
         when ss.scan(/(<[a-zA-Z0-9_]+>)/)
           tokens << create_token(Token::Tag, ss[0], line, ss.pos - column)
+        when ss.scan(/([a-zA-Z_.][-a-zA-Z0-9_.]*)\[([a-zA-Z_.][-a-zA-Z0-9_.]*)\]\s*:/)
+          tokens << create_token(Token::Ident_Colon, ss[1], line, ss.pos - column)
+          tokens << create_token(Token::Named_Ref, ss[2], line, ss.pos - column)
         when ss.scan(/([a-zA-Z_.][-a-zA-Z0-9_.]*)\s*:/)
           tokens << create_token(Token::Ident_Colon, ss[1], line, ss.pos - column)
         when ss.scan(/([a-zA-Z_.][-a-zA-Z0-9_.]*)/)
           tokens << create_token(Token::Ident, ss[0], line, ss.pos - column)
+        when ss.scan(/\[([a-zA-Z_.][-a-zA-Z0-9_.]*)\]/)
+          tokens << create_token(Token::Named_Ref, ss[1], line, ss.pos - column)
         when ss.scan(/%expect/)
           tokens << create_token(Token::P_expect, ss[0], line, ss.pos - column)
         when ss.scan(/%define/)
           tokens << create_token(Token::P_define, ss[0], line, ss.pos - column)
         when ss.scan(/%printer/)
           tokens << create_token(Token::P_printer, ss[0], line, ss.pos - column)
+        when ss.scan(/%error-token/)
+          tokens << create_token(Token::P_error_token, ss[0], line, ss.pos - column)
         when ss.scan(/%lex-param/)
           tokens << create_token(Token::P_lex_param, ss[0], line, ss.pos - column)
         when ss.scan(/%parse-param/)
@@ -257,6 +218,9 @@ module Lrama
         when ss.scan(/\$(<[a-zA-Z0-9_]+>)?(\d+)/) # $1, $2, $<long>1
           tag = ss[1] ? create_token(Token::Tag, ss[1], line, str.length) : nil
           references << [:dollar, Integer(ss[2]), tag, str.length, str.length + ss[0].length - 1]
+        when ss.scan(/\$(<[a-zA-Z0-9_]+>)?([a-zA-Z_.][-a-zA-Z0-9_.]*)/) # $foo, $expr, $<long>program
+          tag = ss[1] ? create_token(Token::Tag, ss[1], line, str.length) : nil
+          references << [:dollar, ss[2], tag, str.length, str.length + ss[0].length - 1]
         when ss.scan(/@\$/) # @$
           references << [:at, "$", nil, str.length, str.length + ss[0].length - 1]
         when ss.scan(/@(\d)+/) # @1

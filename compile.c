@@ -486,7 +486,6 @@ static int iseq_set_local_table(rb_iseq_t *iseq, const rb_ast_id_table_t *tbl);
 static int iseq_set_exception_local_table(rb_iseq_t *iseq);
 static int iseq_set_arguments(rb_iseq_t *iseq, LINK_ANCHOR *const anchor, const NODE *const node);
 
-static int iseq_set_sequence_stackcaching(rb_iseq_t *iseq, LINK_ANCHOR *const anchor);
 static int iseq_set_sequence(rb_iseq_t *iseq, LINK_ANCHOR *const anchor);
 static int iseq_set_exception_table(rb_iseq_t *iseq);
 static int iseq_set_optargs_table(rb_iseq_t *iseq);
@@ -1326,7 +1325,8 @@ new_child_iseq(rb_iseq_t *iseq, const NODE *const node,
     rb_ast_body_t ast;
 
     ast.root = node;
-    ast.compile_option = 0;
+    ast.frozen_string_literal = -1;
+    ast.coverage_enabled = -1;
     ast.script_lines = ISEQ_BODY(iseq)->variable.script_lines;
 
     debugs("[new_child_iseq]> ---------------------------------------\n");
@@ -1415,9 +1415,9 @@ iseq_insert_nop_between_end_and_cont(rb_iseq_t *iseq)
     VALUE catch_table_ary = ISEQ_COMPILE_DATA(iseq)->catch_table_ary;
     if (NIL_P(catch_table_ary)) return;
     unsigned int i, tlen = (unsigned int)RARRAY_LEN(catch_table_ary);
-    const VALUE *tptr = RARRAY_CONST_PTR_TRANSIENT(catch_table_ary);
+    const VALUE *tptr = RARRAY_CONST_PTR(catch_table_ary);
     for (i = 0; i < tlen; i++) {
-        const VALUE *ptr = RARRAY_CONST_PTR_TRANSIENT(tptr[i]);
+        const VALUE *ptr = RARRAY_CONST_PTR(tptr[i]);
         LINK_ELEMENT *end = (LINK_ELEMENT *)(ptr[2] & ~1);
         LINK_ELEMENT *cont = (LINK_ELEMENT *)(ptr[4] & ~1);
         LINK_ELEMENT *e;
@@ -1460,13 +1460,6 @@ iseq_setup_insn(rb_iseq_t *iseq, LINK_ANCHOR *const anchor)
     if (ISEQ_COMPILE_DATA(iseq)->option->instructions_unification) {
         debugs("[compile step 3.2 (iseq_insns_unification)]\n");
         iseq_insns_unification(iseq, anchor);
-        if (compile_debug > 5)
-            dump_disasm_list(FIRST_ELEMENT(anchor));
-    }
-
-    if (ISEQ_COMPILE_DATA(iseq)->option->stack_caching) {
-        debugs("[compile step 3.3 (iseq_set_sequence_stackcaching)]\n");
-        iseq_set_sequence_stackcaching(iseq, anchor);
         if (compile_debug > 5)
             dump_disasm_list(FIRST_ELEMENT(anchor));
     }
@@ -1873,7 +1866,7 @@ iseq_set_arguments(rb_iseq_t *iseq, LINK_ANCHOR *const optargs, const NODE *cons
 
             opt_table = ALLOC_N(VALUE, i+1);
 
-            MEMCPY(opt_table, RARRAY_CONST_PTR_TRANSIENT(labels), VALUE, i+1);
+            MEMCPY(opt_table, RARRAY_CONST_PTR(labels), VALUE, i+1);
             for (j = 0; j < i+1; j++) {
                 opt_table[j] &= ~1;
             }
@@ -2639,14 +2632,14 @@ iseq_set_exception_table(rb_iseq_t *iseq)
     ISEQ_BODY(iseq)->catch_table = NULL;
     if (NIL_P(ISEQ_COMPILE_DATA(iseq)->catch_table_ary)) return COMPILE_OK;
     tlen = (int)RARRAY_LEN(ISEQ_COMPILE_DATA(iseq)->catch_table_ary);
-    tptr = RARRAY_CONST_PTR_TRANSIENT(ISEQ_COMPILE_DATA(iseq)->catch_table_ary);
+    tptr = RARRAY_CONST_PTR(ISEQ_COMPILE_DATA(iseq)->catch_table_ary);
 
     if (tlen > 0) {
         struct iseq_catch_table *table = xmalloc(iseq_catch_table_bytes(tlen));
         table->size = tlen;
 
         for (i = 0; i < table->size; i++) {
-            ptr = RARRAY_CONST_PTR_TRANSIENT(tptr[i]);
+            ptr = RARRAY_CONST_PTR(tptr[i]);
             entry = UNALIGNED_MEMBER_PTR(table, entries[i]);
             entry->type = (enum rb_catch_type)(ptr[0] & 0xffff);
             entry->start = label_get_position((LABEL *)(ptr[1] & ~1));
@@ -3951,167 +3944,6 @@ iseq_insns_unification(rb_iseq_t *iseq, LINK_ANCHOR *const anchor)
     return COMPILE_OK;
 }
 
-#if OPT_STACK_CACHING
-
-#define SC_INSN(insn, stat) sc_insn_info[(insn)][(stat)]
-#define SC_NEXT(insn)       sc_insn_next[(insn)]
-
-#include "opt_sc.inc"
-
-static int
-insn_set_sc_state(rb_iseq_t *iseq, const LINK_ELEMENT *anchor, INSN *iobj, int state)
-{
-    int nstate;
-    int insn_id;
-
-    insn_id = iobj->insn_id;
-    iobj->insn_id = SC_INSN(insn_id, state);
-    nstate = SC_NEXT(iobj->insn_id);
-
-    if (insn_id == BIN(jump) ||
-        insn_id == BIN(branchif) || insn_id == BIN(branchunless)) {
-        LABEL *lobj = (LABEL *)OPERAND_AT(iobj, 0);
-
-        if (lobj->sc_state != 0) {
-            if (lobj->sc_state != nstate) {
-                BADINSN_DUMP(anchor, iobj, lobj);
-                COMPILE_ERROR(iseq, iobj->insn_info.line_no,
-                              "insn_set_sc_state error: %d at "LABEL_FORMAT
-                              ", %d expected\n",
-                              lobj->sc_state, lobj->label_no, nstate);
-                return COMPILE_NG;
-            }
-        }
-        else {
-            lobj->sc_state = nstate;
-        }
-        if (insn_id == BIN(jump)) {
-            nstate = SCS_XX;
-        }
-    }
-    else if (insn_id == BIN(leave)) {
-        nstate = SCS_XX;
-    }
-
-    return nstate;
-}
-
-static int
-label_set_sc_state(LABEL *lobj, int state)
-{
-    if (lobj->sc_state != 0) {
-        if (lobj->sc_state != state) {
-            state = lobj->sc_state;
-        }
-    }
-    else {
-        lobj->sc_state = state;
-    }
-
-    return state;
-}
-
-
-#endif
-
-static int
-iseq_set_sequence_stackcaching(rb_iseq_t *iseq, LINK_ANCHOR *const anchor)
-{
-#if OPT_STACK_CACHING
-    LINK_ELEMENT *list;
-    int state, insn_id;
-
-    /* initialize */
-    state = SCS_XX;
-    list = FIRST_ELEMENT(anchor);
-    /* dump_disasm_list(list); */
-
-    /* for each list element */
-    while (list) {
-      redo_point:
-        switch (list->type) {
-          case ISEQ_ELEMENT_INSN:
-            {
-                INSN *iobj = (INSN *)list;
-                insn_id = iobj->insn_id;
-
-                /* dump_disasm_list(list); */
-
-                switch (insn_id) {
-                  case BIN(nop):
-                    {
-                        /* exception merge point */
-                        if (state != SCS_AX) {
-                            NODE dummy_line_node = generate_dummy_line_node(0, -1);
-                            INSN *rpobj =
-                                new_insn_body(iseq, &dummy_line_node, BIN(reput), 0);
-
-                            /* replace this insn */
-                            ELEM_REPLACE(list, (LINK_ELEMENT *)rpobj);
-                            list = (LINK_ELEMENT *)rpobj;
-                            goto redo_point;
-                        }
-                        break;
-                    }
-                  case BIN(swap):
-                    {
-                        if (state == SCS_AB || state == SCS_BA) {
-                            state = (state == SCS_AB ? SCS_BA : SCS_AB);
-
-                            ELEM_REMOVE(list);
-                            list = list->next;
-                            goto redo_point;
-                        }
-                        break;
-                    }
-                  case BIN(pop):
-                    {
-                        switch (state) {
-                          case SCS_AX:
-                          case SCS_BX:
-                            state = SCS_XX;
-                            break;
-                          case SCS_AB:
-                            state = SCS_AX;
-                            break;
-                          case SCS_BA:
-                            state = SCS_BX;
-                            break;
-                          case SCS_XX:
-                            goto normal_insn;
-                          default:
-                            COMPILE_ERROR(iseq, iobj->insn_info.line_no,
-                                          "unreachable");
-                            return COMPILE_NG;
-                        }
-                        /* remove useless pop */
-                        ELEM_REMOVE(list);
-                        list = list->next;
-                        goto redo_point;
-                    }
-                  default:;
-                    /* none */
-                }		/* end of switch */
-              normal_insn:
-                state = insn_set_sc_state(iseq, anchor, iobj, state);
-                break;
-            }
-          case ISEQ_ELEMENT_LABEL:
-            {
-                LABEL *lobj;
-                lobj = (LABEL *)list;
-
-                state = label_set_sc_state(lobj, state);
-            }
-          default:
-            break;
-        }
-        list = list->next;
-    }
-#endif
-    return COMPILE_OK;
-}
-
 static int
 all_string_result_p(const NODE *node)
 {
@@ -4734,7 +4566,7 @@ compile_hash(rb_iseq_t *iseq, LINK_ANCHOR *const ret, const NODE *node, int meth
                     rb_ary_cat(ary, elem, 2);
                 }
                 VALUE hash = rb_hash_new_with_size(RARRAY_LEN(ary) / 2);
-                rb_hash_bulk_insert(RARRAY_LEN(ary), RARRAY_CONST_PTR_TRANSIENT(ary), hash);
+                rb_hash_bulk_insert(RARRAY_LEN(ary), RARRAY_CONST_PTR(ary), hash);
                 hash = rb_obj_hide(hash);
                 OBJ_FREEZE(hash);
 
@@ -7916,7 +7748,18 @@ compile_resbody(rb_iseq_t *iseq, LINK_ANCHOR *const ret, const NODE *const node,
         }
         ADD_INSNL(ret, line_node, jump, label_miss);
         ADD_LABEL(ret, label_hit);
-        CHECK(COMPILE(ret, "resbody body", resq->nd_body));
+        ADD_TRACE(ret, RUBY_EVENT_RESCUE);
+
+        if (nd_type(resq->nd_body) == NODE_BEGIN && resq->nd_body->nd_body == NULL) {
+            // empty body
+            int lineno = nd_line(resq->nd_body);
+            NODE dummy_line_node = generate_dummy_line_node(lineno, -1);
+            ADD_INSN(ret, &dummy_line_node, putnil);
+        }
+        else {
+            CHECK(COMPILE(ret, "resbody body", resq->nd_body));
+        }
+
         if (ISEQ_COMPILE_DATA(iseq)->option->tailcall_optimization) {
             ADD_INSN(ret, line_node, nop);
         }
@@ -8372,7 +8215,8 @@ compile_builtin_mandatory_only_method(rb_iseq_t *iseq, const NODE *node, const N
 
     rb_ast_body_t ast = {
         .root = &scope_node,
-        .compile_option = 0,
+        .frozen_string_literal = -1,
+        .coverage_enabled = -1,
         .script_lines = ISEQ_BODY(iseq)->variable.script_lines,
     };
 
@@ -10573,6 +10417,7 @@ event_name_to_flag(VALUE sym)
                 CHECK_EVENT(RUBY_EVENT_RETURN);
                 CHECK_EVENT(RUBY_EVENT_B_CALL);
                 CHECK_EVENT(RUBY_EVENT_B_RETURN);
+                CHECK_EVENT(RUBY_EVENT_RESCUE);
 #undef CHECK_EVENT
     return RUBY_EVENT_NONE;
 }
@@ -13311,16 +13156,12 @@ ibf_load_iseq(const struct ibf_load *load, const rb_iseq_t *index_iseq)
 #endif
             pinned_list_store(load->iseq_list, iseq_index, (VALUE)iseq);
 
-#if !USE_LAZY_LOAD
+            if (!USE_LAZY_LOAD || GET_VM()->builtin_function_table) {
 #if IBF_ISEQ_DEBUG
-            fprintf(stderr, "ibf_load_iseq: loading iseq=%p\n", (void *)iseq);
+                fprintf(stderr, "ibf_load_iseq: loading iseq=%p\n", (void *)iseq);
 #endif
-            rb_ibf_load_iseq_complete(iseq);
-#else
-            if (GET_VM()->builtin_function_table) {
                 rb_ibf_load_iseq_complete(iseq);
             }
-#endif /* !USE_LAZY_LOAD */
 
 #if IBF_ISEQ_DEBUG
             fprintf(stderr, "ibf_load_iseq: iseq=%p loaded %p\n",
@@ -13377,9 +13218,9 @@ ibf_load_setup(struct ibf_load *load, VALUE loader_obj, VALUE str)
         rb_raise(rb_eRuntimeError, "broken binary format");
     }
 
-#if USE_LAZY_LOAD
-    str = rb_str_new(RSTRING_PTR(str), RSTRING_LEN(str));
-#endif
+    if (USE_LAZY_LOAD) {
+        str = rb_str_new(RSTRING_PTR(str), RSTRING_LEN(str));
+    }
 
     ibf_load_setup_bytes(load, loader_obj, StringValuePtr(str), RSTRING_LEN(str));
     RB_OBJ_WRITE(loader_obj, &load->str, str);

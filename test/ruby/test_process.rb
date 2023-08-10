@@ -2355,7 +2355,7 @@ EOS
   end
 
   def test_deadlock_by_signal_at_forking
-    assert_separately(%W(--disable=gems - #{RUBY}), <<-INPUT, timeout: 100)
+    assert_separately(%W(- #{RUBY}), <<-INPUT, timeout: 100)
       ruby = ARGV.shift
       GC.start # reduce garbage
       GC.disable # avoid triggering CoW after forks
@@ -2686,4 +2686,39 @@ EOS
       end
     end;
   end if Process.respond_to?(:_fork)
+
+  def test_warmup_promote_all_objects_to_oldgen
+    assert_separately([], "#{<<~"begin;"}\n#{<<~'end;'}")
+    require 'objspace'
+    begin;
+      obj = Object.new
+
+      assert_not_include(ObjectSpace.dump(obj), '"old":true')
+      Process.warmup
+      assert_include(ObjectSpace.dump(obj), '"old":true')
+    end;
+  end
+
+  def test_warmup_run_major_gc_and_compact
+    assert_separately([], "#{<<~"begin;"}\n#{<<~'end;'}")
+    begin;
+      major_gc_count = GC.stat(:major_gc_count)
+      compact_count = GC.stat(:compact_count)
+      Process.warmup
+      assert_equal major_gc_count + 1, GC.stat(:major_gc_count)
+      assert_equal compact_count + 1, GC.stat(:compact_count)
+    end;
+  end
+
+  def test_warmup_precompute_string_coderange
+    assert_separately([], "#{<<~"begin;"}\n#{<<~'end;'}")
+    require 'objspace'
+    begin;
+      obj = "a" * 12
+      obj.force_encoding(Encoding::BINARY)
+      assert_include(ObjectSpace.dump(obj), '"coderange":"unknown"')
+      Process.warmup
+      assert_include(ObjectSpace.dump(obj), '"coderange":"7bit"')
+    end;
+  end
 end

@@ -76,8 +76,11 @@ module Bundler
 
       @lockfile               = lockfile
       @lockfile_contents      = String.new
+
       @locked_bundler_version = nil
-      @locked_ruby_version    = nil
+      @resolved_bundler_version = nil
+
+      @locked_ruby_version = nil
       @new_platform = nil
       @removed_platform = nil
 
@@ -146,7 +149,7 @@ module Bundler
       @dependency_changes = converge_dependencies
       @local_changes = converge_locals
 
-      @incomplete_lockfile = check_missing_lockfile_specs
+      @missing_lockfile_dep = check_missing_lockfile_dep
     end
 
     def gem_version_promoter
@@ -217,6 +220,7 @@ module Bundler
     rescue BundlerError => e
       @resolve = nil
       @resolver = nil
+      @resolution_packages = nil
       @specs = nil
       @gem_version_promoter = nil
 
@@ -233,6 +237,14 @@ module Bundler
     end
 
     def current_dependencies
+      filter_relevant(dependencies)
+    end
+
+    def current_locked_dependencies
+      filter_relevant(locked_dependencies)
+    end
+
+    def filter_relevant(dependencies)
       dependencies.select do |d|
         d.should_include? && !d.gem_platforms([generic_local_platform]).empty?
       end
@@ -272,7 +284,7 @@ module Bundler
       @resolve ||= if Bundler.frozen_bundle?
         Bundler.ui.debug "Frozen, using resolution from the lockfile"
         @locked_specs
-      elsif !unlocking? && nothing_changed?
+      elsif no_resolve_needed?
         if deleted_deps.any?
           Bundler.ui.debug "Some dependencies were deleted, using a subset of the resolution from the lockfile"
           SpecSet.new(filter_specs(@locked_specs, @dependencies - deleted_deps))
@@ -309,7 +321,7 @@ module Bundler
 
       if @locked_bundler_version
         locked_major = @locked_bundler_version.segments.first
-        current_major = Bundler.gem_version.segments.first
+        current_major = bundler_version_to_lock.segments.first
 
         updating_major = locked_major < current_major
       end
@@ -349,27 +361,16 @@ module Bundler
       end
     end
 
+    def bundler_version_to_lock
+      @resolved_bundler_version || Bundler.gem_version
+    end
+
     def to_lock
       require_relative "lockfile_generator"
       LockfileGenerator.generate(self)
     end
 
     def ensure_equivalent_gemfile_and_lockfile(explicit_flag = false)
-      msg = String.new
-      msg << "You are trying to install in deployment mode after changing\n" \
-             "your Gemfile. Run `bundle install` elsewhere and add the\n" \
-             "updated #{Bundler.default_lockfile.relative_path_from(SharedHelpers.pwd)} to version control."
-
-      unless explicit_flag
-        suggested_command = if Bundler.settings.locations("frozen").keys.&([:global, :local]).any?
-          "bundle config unset frozen"
-        elsif Bundler.settings.locations("deployment").keys.&([:global, :local]).any?
-          "bundle config unset deployment"
-        end
-        msg << "\n\nIf this is a development machine, remove the #{Bundler.default_gemfile} " \
-               "freeze \nby running `#{suggested_command}`." if suggested_command
-      end
-
       added =   []
       deleted = []
       changed = []
@@ -383,13 +384,8 @@ module Bundler
       deleted.concat deleted_deps.map {|d| "* #{pretty_dep(d)}" } if deleted_deps.any?
 
       both_sources = Hash.new {|h, k| h[k] = [] }
-      @dependencies.each {|d| both_sources[d.name][0] = d }
-
-      locked_dependencies.each do |d|
-        next if !Bundler.feature_flag.bundler_3_mode? && @locked_specs[d.name].empty?
-
-        both_sources[d.name][1] = d
-      end
+      current_dependencies.each {|d| both_sources[d.name][0] = d }
+      current_locked_dependencies.each {|d| both_sources[d.name][1] = d }
 
       both_sources.each do |name, (dep, lock_dep)|
         next if dep.nil? || lock_dep.nil?
@@ -398,17 +394,26 @@ module Bundler
         lock_source = lock_dep.source || sources.default_source
         next if lock_source.include?(gemfile_source)
 
-        gemfile_source_name = dep.source ? gemfile_source.identifier : "no specified source"
-        lockfile_source_name = lock_dep.source ? lock_source.identifier : "no specified source"
+        gemfile_source_name = dep.source ? gemfile_source.to_gemfile : "no specified source"
+        lockfile_source_name = lock_dep.source ? lock_source.to_gemfile : "no specified source"
         changed << "* #{name} from `#{lockfile_source_name}` to `#{gemfile_source_name}`"
       end
 
       reason = change_reason
-      msg << "\n\n#{reason.split(", ").map(&:capitalize).join("\n")}" unless reason.strip.empty?
+      msg = String.new
+      msg << "#{reason.capitalize.strip}, but the lockfile can't be updated because frozen mode is set"
       msg << "\n\nYou have added to the Gemfile:\n" << added.join("\n") if added.any?
       msg << "\n\nYou have deleted from the Gemfile:\n" << deleted.join("\n") if deleted.any?
       msg << "\n\nYou have changed in the Gemfile:\n" << changed.join("\n") if changed.any?
-      msg << "\n"
+      msg << "\n\nRun `bundle install` elsewhere and add the updated #{Bundler.default_lockfile.relative_path_from(SharedHelpers.pwd)} to version control.\n"
+
+      unless explicit_flag
+        suggested_command = unless Bundler.settings.locations("frozen").keys.include?(:env)
+          "bundle config set frozen false"
+        end
+        msg << "If this is a development machine, remove the #{Bundler.default_gemfile.relative_path_from(SharedHelpers.pwd)} " \
+               "freeze by running `#{suggested_command}`." if suggested_command
+      end
 
       raise ProductionError, msg if added.any? || deleted.any? || changed.any? || !nothing_changed?
     end
@@ -473,7 +478,11 @@ module Bundler
     private :sources
 
     def nothing_changed?
-      !@source_changes && !@dependency_changes && !@new_platform && !@path_changes && !@local_changes && !@incomplete_lockfile
+      !@source_changes && !@dependency_changes && !@new_platform && !@path_changes && !@local_changes && !@missing_lockfile_dep && !@unlocking_bundler
+    end
+
+    def no_resolve_needed?
+      !unlocking? && nothing_changed?
     end
 
     def unlocking?
@@ -487,7 +496,14 @@ module Bundler
     end
 
     def expanded_dependencies
-      dependencies + metadata_dependencies
+      dependencies_with_bundler + metadata_dependencies
+    end
+
+    def dependencies_with_bundler
+      return dependencies unless @unlocking_bundler
+      return dependencies if dependencies.map(&:name).include?("bundler")
+
+      [Dependency.new("bundler", @unlocking_bundler)] + dependencies
     end
 
     def resolution_packages
@@ -553,6 +569,8 @@ module Bundler
     def start_resolution
       result = resolver.start
 
+      @resolved_bundler_version = result.find {|spec| spec.name == "bundler" }&.version
+
       SpecSet.new(SpecSet.new(result).for(dependencies, false, @platforms))
     end
 
@@ -610,7 +628,8 @@ module Bundler
         [@new_platform, "you added a new platform to your gemfile"],
         [@path_changes, "the gemspecs for path gems changed"],
         [@local_changes, "the gemspecs for git local gems changed"],
-        [@incomplete_lockfile, "your lock file is missing some gems"],
+        [@missing_lockfile_dep, "your lock file is missing \"#{@missing_lockfile_dep}\""],
+        [@unlocking_bundler, "an update to the version of Bundler itself was requested"],
       ].select(&:first).map(&:last).join(", ")
     end
 
@@ -665,7 +684,7 @@ module Bundler
       !sources_with_changes.each {|source| @unlock[:sources] << source.name }.empty?
     end
 
-    def check_missing_lockfile_specs
+    def check_missing_lockfile_dep
       all_locked_specs = @locked_specs.map(&:name) << "bundler"
 
       missing = @locked_specs.select do |s|
@@ -675,10 +694,14 @@ module Bundler
       if missing.any?
         @locked_specs.delete(missing)
 
-        true
-      else
-        false
+        return missing.first.name
       end
+
+      return if @dependency_changes
+
+      current_dependencies.find do |d|
+        @locked_specs[d.name].empty? && d.name != "bundler"
+      end&.name
     end
 
     def converge_paths
@@ -862,8 +885,16 @@ module Bundler
       metadata_dependencies.each do |dep|
         source_requirements[dep.name] = sources.metadata_source
       end
-      source_requirements[:default_bundler] = source_requirements["bundler"] || sources.default_source
-      source_requirements["bundler"] = sources.metadata_source # needs to come last to override
+
+      default_bundler_source = source_requirements["bundler"] || sources.default_source
+
+      if @unlocking_bundler
+        default_bundler_source.add_dependency_names("bundler")
+      else
+        source_requirements[:default_bundler] = default_bundler_source
+        source_requirements["bundler"] = sources.metadata_source # needs to come last to override
+      end
+
       verify_changed_sources!
       source_requirements
     end
@@ -886,7 +917,8 @@ module Bundler
       if preserve_unknown_sections
         sections_to_ignore = LockfileParser.sections_to_ignore(@locked_bundler_version)
         sections_to_ignore += LockfileParser.unknown_sections_in_lockfile(current)
-        sections_to_ignore += LockfileParser::ENVIRONMENT_VERSION_SECTIONS
+        sections_to_ignore << LockfileParser::RUBY
+        sections_to_ignore << LockfileParser::BUNDLED unless @unlocking_bundler
         pattern = /#{Regexp.union(sections_to_ignore)}\n(\s{2,}.*\n)+/
         whitespace_cleanup = /\n{2,}/
         current = current.gsub(pattern, "\n").gsub(whitespace_cleanup, "\n\n").strip
@@ -909,6 +941,7 @@ module Bundler
                 Bundler.local_platform == Gem::Platform::RUBY ||
                 !platforms.include?(Gem::Platform::RUBY) ||
                 (@new_platform && platforms.last == Gem::Platform::RUBY) ||
+                @path_changes ||
                 @dependency_changes ||
                 !@originally_locked_specs.incomplete_ruby_specs?(dependencies)
 

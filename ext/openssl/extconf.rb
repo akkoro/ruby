@@ -13,7 +13,14 @@
 
 require "mkmf"
 
-dir_config_given = dir_config("openssl").any?
+if defined?(::TruffleRuby)
+  # Always respect the openssl prefix chosen by truffle/openssl-prefix
+  require 'truffle/openssl-prefix'
+  dir_config_given = dir_config("openssl", ENV["OPENSSL_PREFIX"]).any?
+else
+  dir_config_given = dir_config("openssl").any?
+end
+
 dir_config("kerberos")
 
 Logging::message "=== OpenSSL for Ruby configurator ===\n"
@@ -27,6 +34,7 @@ if with_config("debug") or enable_config("debug")
 end
 $defs.push("-D""OPENSSL_SUPPRESS_DEPRECATED")
 
+have_func("rb_io_descriptor")
 have_func("rb_io_maybe_wait(0, Qnil, Qnil, Qnil)", "ruby/io.h") # Ruby 3.1
 
 Logging::message "=== Checking for system dependent stuff... ===\n"
@@ -190,6 +198,12 @@ have_func("EVP_PKEY_eq(NULL, NULL)", evp_h)
 have_func("EVP_PKEY_dup(NULL)", evp_h)
 
 Logging::message "=== Checking done. ===\n"
+
+# Append flags from environment variables.
+extcflags = ENV["RUBY_OPENSSL_EXTCFLAGS"]
+append_cflags(extcflags.split) if extcflags
+extldflags = ENV["RUBY_OPENSSL_EXTLDFLAGS"]
+append_ldflags(extldflags.split) if extldflags
 
 create_header
 create_makefile("openssl")

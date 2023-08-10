@@ -103,7 +103,7 @@
 #ifdef NOT_RUBY
 #include "regint.h"
 #include "st.h"
-#else
+#elif defined RUBY_EXPORT
 #include "internal.h"
 #include "internal/bits.h"
 #include "internal/hash.h"
@@ -342,7 +342,7 @@ get_power2(st_index_t size)
     unsigned int n = ST_INDEX_BITS - nlz_intptr(size);
     if (n <= MAX_POWER2)
         return n < MINIMAL_POWER2 ? MINIMAL_POWER2 : n;
-#ifndef NOT_RUBY
+#ifdef RUBY
     /* Ran out of the table entries */
     rb_raise(rb_eRuntimeError, "st_table too big");
 #endif
@@ -657,8 +657,7 @@ st_clear(st_table *tab)
 void
 st_free_table(st_table *tab)
 {
-    if (tab->bins != NULL)
-        free(tab->bins);
+    free(tab->bins);
     free(tab->entries);
     free(tab);
 }
@@ -777,8 +776,7 @@ rebuild_table(st_table *tab)
         tab->entry_power = new_tab->entry_power;
         tab->bin_power = new_tab->bin_power;
         tab->size_ind = new_tab->size_ind;
-        if (tab->bins != NULL)
-            free(tab->bins);
+        free(tab->bins);
         tab->bins = new_tab->bins;
         free(tab->entries);
         tab->entries = new_tab->entries;
@@ -1228,6 +1226,36 @@ st_insert2(st_table *tab, st_data_t key, st_data_t value,
     return 1;
 }
 
+/* Create a copy of old_tab into new_tab. */
+st_table *
+st_replace(st_table *new_tab, st_table *old_tab)
+{
+    *new_tab = *old_tab;
+    if (old_tab->bins == NULL)
+        new_tab->bins = NULL;
+    else {
+        new_tab->bins = (st_index_t *) malloc(bins_size(old_tab));
+#ifndef RUBY
+        if (new_tab->bins == NULL) {
+            return NULL;
+        }
+#endif
+    }
+    new_tab->entries = (st_table_entry *) malloc(get_allocated_entries(old_tab)
+                                                 * sizeof(st_table_entry));
+#ifndef RUBY
+    if (new_tab->entries == NULL) {
+        return NULL;
+    }
+#endif
+    MEMCPY(new_tab->entries, old_tab->entries, st_table_entry,
+           get_allocated_entries(old_tab));
+    if (old_tab->bins != NULL)
+        MEMCPY(new_tab->bins, old_tab->bins, char, bins_size(old_tab));
+
+    return new_tab;
+}
+
 /* Create and return a copy of table OLD_TAB.  */
 st_table *
 st_copy(st_table *old_tab)
@@ -1239,30 +1267,12 @@ st_copy(st_table *old_tab)
     if (new_tab == NULL)
         return NULL;
 #endif
-    *new_tab = *old_tab;
-    if (old_tab->bins == NULL)
-        new_tab->bins = NULL;
-    else {
-        new_tab->bins = (st_index_t *) malloc(bins_size(old_tab));
-#ifndef RUBY
-        if (new_tab->bins == NULL) {
-            free(new_tab);
-            return NULL;
-        }
-#endif
-    }
-    new_tab->entries = (st_table_entry *) malloc(get_allocated_entries(old_tab)
-                                                 * sizeof(st_table_entry));
-#ifndef RUBY
-    if (new_tab->entries == NULL) {
+
+    if (st_replace(new_tab, old_tab) == NULL) {
         st_free_table(new_tab);
         return NULL;
     }
-#endif
-    MEMCPY(new_tab->entries, old_tab->entries, st_table_entry,
-           get_allocated_entries(old_tab));
-    if (old_tab->bins != NULL)
-        MEMCPY(new_tab->bins, old_tab->bins, char, bins_size(old_tab));
+
     return new_tab;
 }
 
@@ -2061,6 +2071,7 @@ st_numhash(st_data_t n)
     return (st_index_t)((n>>s1|(n<<s2)) ^ (n>>s2));
 }
 
+#ifdef RUBY
 /* Expand TAB to be suitable for holding SIZ entries in total.
    Pre-existing entries remain not deleted inside of TAB, but its bins
    are cleared to expect future reconstruction. See rehash below. */
@@ -2077,10 +2088,8 @@ st_expand_table(st_table *tab, st_index_t siz)
     n = get_allocated_entries(tab);
     MEMCPY(tmp->entries, tab->entries, st_table_entry, n);
     free(tab->entries);
-    if (tab->bins != NULL)
-        free(tab->bins);
-    if (tmp->bins != NULL)
-        free(tmp->bins);
+    free(tab->bins);
+    free(tmp->bins);
     tab->entry_power = tmp->entry_power;
     tab->bin_power = tmp->bin_power;
     tab->size_ind = tmp->size_ind;
@@ -2098,10 +2107,10 @@ st_rehash_linear(st_table *tab)
     int eq_p, rebuilt_p;
     st_index_t i, j;
     st_table_entry *p, *q;
-    if (tab->bins) {
-        free(tab->bins);
-        tab->bins = NULL;
-    }
+
+    free(tab->bins);
+    tab->bins = NULL;
+
     for (i = tab->entries_start; i < tab->entries_bound; i++) {
         p = &tab->entries[i];
         if (DELETED_ENTRY_P(p))
@@ -2200,7 +2209,6 @@ st_rehash(st_table *tab)
     } while (rebuilt_p);
 }
 
-#ifdef RUBY
 static st_data_t
 st_stringify(VALUE key)
 {

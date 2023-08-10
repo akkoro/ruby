@@ -16,11 +16,6 @@
 #include "ruby/fiber/scheduler.h"
 #include "ruby/io/buffer.h"
 
-#ifdef _WIN32
-# include "ruby/ruby.h"
-# include "ruby/io.h"
-#endif
-
 #include <ctype.h>
 #include <errno.h>
 #include <stddef.h>
@@ -221,7 +216,7 @@ struct argf {
     long lineno;
     VALUE argv;
     VALUE inplace;
-    struct rb_io_enc_t encs;
+    struct rb_io_encoding encs;
     int8_t init_p, next_p, binmode;
 };
 
@@ -525,7 +520,6 @@ rb_cloexec_fcntl_dupfd(int fd, int minfd)
 static int io_fflush(rb_io_t *);
 static rb_io_t *flush_before_seek(rb_io_t *fptr);
 
-#define FMODE_PREP (1<<16)
 #define FMODE_SIGNAL_ON_EPIPE (1<<17)
 
 #define fptr_signal_on_epipe(fptr) \
@@ -1463,7 +1457,7 @@ rb_io_wait(VALUE io, VALUE events, VALUE timeout)
 static VALUE
 io_from_fd(int fd)
 {
-    return prep_io(fd, FMODE_PREP, rb_cIO, NULL);
+    return prep_io(fd, FMODE_EXTERNAL, rb_cIO, NULL);
 }
 
 static int
@@ -2875,6 +2869,14 @@ rb_io_descriptor(VALUE io)
     }
 }
 
+int
+rb_io_mode(VALUE io)
+{
+    rb_io_t *fptr;
+    GetOpenFile(io, fptr);
+    return fptr->mode;
+}
+
 /*
  *  call-seq:
  *    pid -> integer or nil
@@ -2921,7 +2923,7 @@ rb_io_pid(VALUE io)
  *    File.open("testfile") {|f| f.path} # => "testfile"
  */
 
-static VALUE
+VALUE
 rb_io_path(VALUE io)
 {
     rb_io_t *fptr = RFILE(io)->fptr;
@@ -5254,7 +5256,7 @@ rb_io_close_on_exec_p(VALUE io)
  *
  *  Sets a close-on-exec flag.
  *
- *     f = open("/dev/null")
+ *     f = File.open(File::NULL)
  *     f.close_on_exec = true
  *     system("cat", "/proc/self/fd/#{f.fileno}") # cat: /proc/self/fd/3: No such file or directory
  *     f.closed?                #=> false
@@ -5305,7 +5307,7 @@ rb_io_set_close_on_exec(VALUE io, VALUE arg)
 #define rb_io_set_close_on_exec rb_f_notimplement
 #endif
 
-#define IS_PREP_STDIO(f) ((f)->mode & FMODE_PREP)
+#define RUBY_IO_EXTERNAL_P(f) ((f)->mode & FMODE_EXTERNAL)
 #define PREP_STDIO_NAME(f) (RSTRING_PTR((f)->pathv))
 
 static VALUE
@@ -5422,14 +5424,6 @@ maygvl_fclose(FILE *file, int keepgvl)
 static void free_io_buffer(rb_io_buffer_t *buf);
 static void clear_codeconv(rb_io_t *fptr);
 
-static void*
-call_close_wait_nogvl(void *arg)
-{
-    struct rb_io_close_wait_list *busy = (struct rb_io_close_wait_list *)arg;
-    rb_notify_fd_close_wait(busy);
-    return NULL;
-}
-
 static void
 fptr_finalize_flush(rb_io_t *fptr, int noraise, int keepgvl,
                     struct rb_io_close_wait_list *busy)
@@ -5463,7 +5457,7 @@ fptr_finalize_flush(rb_io_t *fptr, int noraise, int keepgvl,
 
     int done = 0;
 
-    if (IS_PREP_STDIO(fptr) || fd <= 2) {
+    if (RUBY_IO_EXTERNAL_P(fptr) || fd <= 2) {
         // Need to keep FILE objects of stdin, stdout and stderr, so we are done:
         done = 1;
     }
@@ -5475,7 +5469,7 @@ fptr_finalize_flush(rb_io_t *fptr, int noraise, int keepgvl,
     // Ensure waiting_fd users do not hit EBADF.
     if (busy) {
         // Wait for them to exit before we call close().
-        (void)rb_thread_call_without_gvl(call_close_wait_nogvl, busy, RUBY_UBF_IO, 0);
+        rb_notify_fd_close_wait(busy);
     }
 
     // Disable for now.
@@ -5770,10 +5764,8 @@ io_close(VALUE io)
  *
  *  Related: IO#close_read, IO#close_write, IO#close.
  */
-
-
-static VALUE
-rb_io_closed(VALUE io)
+VALUE
+rb_io_closed_p(VALUE io)
 {
     rb_io_t *fptr;
     VALUE write_io;
@@ -6724,8 +6716,6 @@ rb_io_extract_encoding_option(VALUE opt, rb_encoding **enc_p, rb_encoding **enc2
     return extracted;
 }
 
-typedef struct rb_io_enc_t convconfig_t;
-
 static void
 validate_enc_binmode(int *fmode_p, int ecflags, rb_encoding *enc, rb_encoding *enc2)
 {
@@ -6784,7 +6774,7 @@ extract_binmode(VALUE opthash, int *fmode)
 
 void
 rb_io_extract_modeenc(VALUE *vmode_p, VALUE *vperm_p, VALUE opthash,
-        int *oflags_p, int *fmode_p, convconfig_t *convconfig_p)
+        int *oflags_p, int *fmode_p, struct rb_io_encoding *convconfig_p)
 {
     VALUE vmode;
     int oflags, fmode;
@@ -7112,11 +7102,11 @@ io_set_encoding_by_bom(VALUE io)
 
 static VALUE
 rb_file_open_generic(VALUE io, VALUE filename, int oflags, int fmode,
-                     const convconfig_t *convconfig, mode_t perm)
+                     const struct rb_io_encoding *convconfig, mode_t perm)
 {
     VALUE pathv;
     rb_io_t *fptr;
-    convconfig_t cc;
+    struct rb_io_encoding cc;
     if (!convconfig) {
         /* Set to default encodings */
         rb_io_ext_int_to_encs(NULL, NULL, &cc.enc, &cc.enc2, fmode);
@@ -7150,7 +7140,7 @@ rb_file_open_internal(VALUE io, VALUE filename, const char *modestr)
 {
     int fmode = rb_io_modestr_fmode(modestr);
     const char *p = strchr(modestr, ':');
-    convconfig_t convconfig;
+    struct rb_io_encoding convconfig;
 
     if (p) {
         parse_mode_enc(p+1, rb_usascii_encoding(),
@@ -7258,7 +7248,7 @@ static void
 fptr_copy_finalizer(rb_io_t *fptr, const rb_io_t *orig)
 {
 #if defined(__CYGWIN__) || !defined(HAVE_WORKING_FORK)
-    void (*const old_finalize)(struct rb_io_t*,int) = fptr->finalize;
+    void (*const old_finalize)(struct rb_io*,int) = fptr->finalize;
 
     if (old_finalize == orig->finalize) return;
 #endif
@@ -7463,7 +7453,7 @@ char *rb_execarg_commandline(const struct rb_execarg *eargp, VALUE *prog);
 #ifndef __EMSCRIPTEN__
 static VALUE
 pipe_open(VALUE execarg_obj, const char *modestr, int fmode,
-          const convconfig_t *convconfig)
+          const struct rb_io_encoding *convconfig)
 {
     struct rb_execarg *eargp = NIL_P(execarg_obj) ? NULL : rb_execarg_get(execarg_obj);
     VALUE prog = eargp ? (eargp->use_shell ? eargp->invoke.sh.shell_script : eargp->invoke.cmd.command_name) : Qfalse ;
@@ -7692,7 +7682,7 @@ pipe_open(VALUE execarg_obj, const char *modestr, int fmode,
 #else
 static VALUE
 pipe_open(VALUE execarg_obj, const char *modestr, int fmode,
-          const convconfig_t *convconfig)
+          const struct rb_io_encoding *convconfig)
 {
     rb_raise(rb_eNotImpError, "popen() is not available");
 }
@@ -7714,7 +7704,7 @@ is_popen_fork(VALUE prog)
 
 static VALUE
 pipe_open_s(VALUE prog, const char *modestr, int fmode,
-            const convconfig_t *convconfig)
+            const struct rb_io_encoding *convconfig)
 {
     int argc = 1;
     VALUE *argv = &prog;
@@ -7923,7 +7913,7 @@ rb_io_popen(VALUE pname, VALUE pmode, VALUE env, VALUE opt)
     const char *modestr;
     VALUE tmp, execarg_obj = Qnil;
     int oflags, fmode;
-    convconfig_t convconfig;
+    struct rb_io_encoding convconfig;
 
     tmp = rb_check_array_type(pname);
     if (!NIL_P(tmp)) {
@@ -7977,7 +7967,7 @@ popen_finish(VALUE port, VALUE klass)
 static void
 rb_scan_open_args(int argc, const VALUE *argv,
         VALUE *fname_p, int *oflags_p, int *fmode_p,
-        convconfig_t *convconfig_p, mode_t *perm_p)
+        struct rb_io_encoding *convconfig_p, mode_t *perm_p)
 {
     VALUE opt, fname, vmode, vperm;
     int oflags, fmode;
@@ -8001,7 +7991,7 @@ rb_open_file(int argc, const VALUE *argv, VALUE io)
 {
     VALUE fname;
     int oflags, fmode;
-    convconfig_t convconfig;
+    struct rb_io_encoding convconfig;
     mode_t perm;
 
     rb_scan_open_args(argc, argv, &fname, &oflags, &fmode, &convconfig, &perm);
@@ -8119,20 +8109,10 @@ check_pipe_command(VALUE filename_or_command)
  *    open(path, mode = 'r', perm = 0666, **opts)             -> io or nil
  *    open(path, mode = 'r', perm = 0666, **opts) {|io| ... } -> obj
  *
- *  Creates an IO object connected to the given stream, file, or subprocess.
+ *  Creates an IO object connected to the given file.
  *
- *  Required string argument +path+ determines which of the following occurs:
- *
- *  - The file at the specified +path+ is opened.
- *  - The process forks.
- *  - A subprocess is created.
- *
- *  Each of these is detailed below.
- *
- *  <b>File Opened</b>
-
- *  If +path+ does _not_ start with a pipe character (<tt>'|'</tt>),
- *  a file stream is opened with <tt>File.open(path, mode, perm, **opts)</tt>.
+ *  This method has potential security vulnerabilities if called with untrusted input;
+ *  see {Command Injection}[rdoc-ref:command_injection.rdoc].
  *
  *  With no block given, file stream is returned:
  *
@@ -8148,67 +8128,6 @@ check_pipe_command(VALUE filename_or_command)
  *    #<File:t.txt>
  *
  *  See File.open for details.
- *
- *  <b>Process Forked</b>
- *
- *  If +path+ is the 2-character string <tt>'|-'</tt>, the process forks
- *  and the child process is connected to the parent.
- *
- *  With no block given:
- *
- *    io = open('|-')
- *    if io
- *      $stderr.puts "In parent, child pid is #{io.pid}."
- *    else
- *      $stderr.puts "In child, pid is #{$$}."
- *    end
- *
- *  Output:
- *
- *    In parent, child pid is 27903.
- *    In child, pid is 27903.
- *
- *  With a block given:
- *
- *    open('|-') do |io|
- *      if io
- *        $stderr.puts "In parent, child pid is #{io.pid}."
- *      else
- *        $stderr.puts "In child, pid is #{$$}."
- *      end
- *    end
- *
- *  Output:
- *
- *    In parent, child pid is 28427.
- *    In child, pid is 28427.
- *
- *  <b>Subprocess Created</b>
- *
- *  If +path+ is <tt>'|command'</tt> (<tt>'command' != '-'</tt>),
- *  a new subprocess runs the command; its open stream is returned.
- *  Note that the command may be processed by shell if it contains
- *  shell metacharacters.
- *
- *  With no block given:
- *
- *    io = open('|echo "Hi!"') # => #<IO:fd 12>
- *    print io.gets
- *    io.close
- *
- *  Output:
- *
- *    "Hi!"
- *
- *  With a block given, calls the block with the stream, then closes the stream:
- *
- *    open('|echo "Hi!"') do |io|
- *      print io.gets
- *    end
- *
- *  Output:
- *
- *    "Hi!"
  *
  */
 
@@ -8232,6 +8151,8 @@ rb_f_open(int argc, VALUE *argv, VALUE _)
             else {
                 VALUE cmd = check_pipe_command(tmp);
                 if (!NIL_P(cmd)) {
+                    // TODO: when removed in 4.0, update command_injection.rdoc
+                    rb_warn_deprecated_to_remove_at(4.0, "Calling Kernel#open with a leading '|'", "IO.popen");
                     argv[0] = cmd;
                     return rb_io_s_popen(argc, argv, rb_cIO);
                 }
@@ -8249,13 +8170,13 @@ rb_f_open(int argc, VALUE *argv, VALUE _)
     return rb_io_s_open(argc, argv, rb_cFile);
 }
 
-static VALUE rb_io_open_generic(VALUE, VALUE, int, int, const convconfig_t *, mode_t);
+static VALUE rb_io_open_generic(VALUE, VALUE, int, int, const struct rb_io_encoding *, mode_t);
 
 static VALUE
 rb_io_open(VALUE io, VALUE filename, VALUE vmode, VALUE vperm, VALUE opt)
 {
     int oflags, fmode;
-    convconfig_t convconfig;
+    struct rb_io_encoding convconfig;
     mode_t perm;
 
     rb_io_extract_modeenc(&vmode, &vperm, opt, &oflags, &fmode, &convconfig);
@@ -8265,10 +8186,12 @@ rb_io_open(VALUE io, VALUE filename, VALUE vmode, VALUE vperm, VALUE opt)
 
 static VALUE
 rb_io_open_generic(VALUE klass, VALUE filename, int oflags, int fmode,
-                   const convconfig_t *convconfig, mode_t perm)
+                   const struct rb_io_encoding *convconfig, mode_t perm)
 {
     VALUE cmd;
     if (klass == rb_cIO && !NIL_P(cmd = check_pipe_command(filename))) {
+        // TODO: when removed in 4.0, update command_injection.rdoc
+        rb_warn_deprecated_to_remove_at(4.0, "IO process creation with a leading '|'", "IO.popen");
         return pipe_open_s(cmd, rb_io_oflags_modestr(oflags), fmode, convconfig);
     }
     else {
@@ -8289,7 +8212,7 @@ io_reopen(VALUE io, VALUE nfile)
     GetOpenFile(nfile, orig);
 
     if (fptr == orig) return io;
-    if (IS_PREP_STDIO(fptr)) {
+    if (RUBY_IO_EXTERNAL_P(fptr)) {
         if ((fptr->stdio_file == stdin && !(orig->mode & FMODE_READABLE)) ||
             (fptr->stdio_file == stdout && !(orig->mode & FMODE_WRITABLE)) ||
             (fptr->stdio_file == stderr && !(orig->mode & FMODE_WRITABLE))) {
@@ -8315,17 +8238,17 @@ io_reopen(VALUE io, VALUE nfile)
     }
 
     /* copy rb_io_t structure */
-    fptr->mode = orig->mode | (fptr->mode & FMODE_PREP);
+    fptr->mode = orig->mode | (fptr->mode & FMODE_EXTERNAL);
     fptr->pid = orig->pid;
     fptr->lineno = orig->lineno;
     if (RTEST(orig->pathv)) fptr->pathv = orig->pathv;
-    else if (!IS_PREP_STDIO(fptr)) fptr->pathv = Qnil;
+    else if (!RUBY_IO_EXTERNAL_P(fptr)) fptr->pathv = Qnil;
     fptr_copy_finalizer(fptr, orig);
 
     fd = fptr->fd;
     fd2 = orig->fd;
     if (fd != fd2) {
-        if (IS_PREP_STDIO(fptr) || fd <= 2 || !fptr->stdio_file) {
+        if (RUBY_IO_EXTERNAL_P(fptr) || fd <= 2 || !fptr->stdio_file) {
             /* need to keep FILE objects of stdin, stdout and stderr */
             if (rb_cloexec_dup2(fd2, fd) < 0)
                 rb_sys_fail_path(orig->pathv);
@@ -8430,10 +8353,10 @@ rb_io_reopen(int argc, VALUE *argv, VALUE file)
 
     if (!NIL_P(nmode) || !NIL_P(opt)) {
         int fmode;
-        convconfig_t convconfig;
+        struct rb_io_encoding convconfig;
 
         rb_io_extract_modeenc(&nmode, 0, opt, &oflags, &fmode, &convconfig);
-        if (IS_PREP_STDIO(fptr) &&
+        if (RUBY_IO_EXTERNAL_P(fptr) &&
             ((fptr->mode & FMODE_READWRITE) & (fmode & FMODE_READWRITE)) !=
             (fptr->mode & FMODE_READWRITE)) {
             rb_raise(rb_eArgError,
@@ -8512,7 +8435,7 @@ rb_io_init_copy(VALUE dest, VALUE io)
     rb_io_flush(io);
 
     /* copy rb_io_t structure */
-    fptr->mode = orig->mode & ~FMODE_PREP;
+    fptr->mode = orig->mode & ~FMODE_EXTERNAL;
     fptr->encs = orig->encs;
     fptr->pid = orig->pid;
     fptr->lineno = orig->lineno;
@@ -9187,26 +9110,78 @@ stderr_getter(ID id, VALUE *ptr)
 }
 
 static VALUE
+allocate_and_open_new_file(VALUE klass)
+{
+    VALUE self = io_alloc(klass);
+    rb_io_make_open_file(self);
+    return self;
+}
+
+VALUE
+rb_io_open_descriptor(VALUE klass, int descriptor, int mode, VALUE path, VALUE timeout, struct rb_io_encoding *encoding)
+{
+    int state;
+    VALUE self = rb_protect(allocate_and_open_new_file, klass, &state);
+    if (state) {
+        /* if we raised an exception allocating an IO object, but the caller
+           intended to transfer ownership of this FD to us, close the fd before
+           raising the exception. Otherwise, we would leak a FD - the caller
+           expects GC to close the file, but we never got around to assigning
+           it to a rb_io. */
+        if (!(mode & FMODE_EXTERNAL)) {
+            maygvl_close(descriptor, 0);
+        }
+        rb_jump_tag(state);
+    }
+
+
+    rb_io_t *io = RFILE(self)->fptr;
+    io->self = self;
+    io->fd = descriptor;
+    io->mode = mode;
+
+    /* At this point, Ruby fully owns the descriptor, and will close it when
+       the IO gets GC'd (unless FMODE_EXTERNAL was set), no matter what happens
+       in the rest of this method. */
+
+    if (NIL_P(path)) {
+        io->pathv = Qnil;
+    }
+    else {
+        StringValue(path);
+        io->pathv = rb_str_new_frozen(path);
+    }
+
+    io->timeout = timeout;
+
+    if (encoding) {
+        io->encs = *encoding;
+    }
+
+    rb_update_max_fd(descriptor);
+
+    return self;
+}
+
+static VALUE
 prep_io(int fd, int fmode, VALUE klass, const char *path)
 {
-    rb_io_t *fp;
-    VALUE io = io_alloc(klass);
+    VALUE path_value = Qnil;
+    if (path) {
+        path_value = rb_obj_freeze(rb_str_new_cstr(path));
+    }
 
-    MakeOpenFile(io, fp);
-    fp->self = io;
-    fp->fd = fd;
-    fp->mode = fmode;
-    fp->timeout = Qnil;
-    if (!io_check_tty(fp)) {
+    VALUE self = rb_io_open_descriptor(klass, fd, fmode, path_value, Qnil, NULL);
+    rb_io_t*io = RFILE(self)->fptr;
+
+    if (!io_check_tty(io)) {
 #ifdef __CYGWIN__
-        fp->mode |= FMODE_BINMODE;
+        io->mode |= FMODE_BINMODE;
         setmode(fd, O_BINARY);
 #endif
     }
-    if (path) fp->pathv = rb_obj_freeze(rb_str_new_cstr(path));
-    rb_update_max_fd(fd);
 
-    return io;
+    return self;
 }
 
 VALUE
@@ -9222,7 +9197,7 @@ static VALUE
 prep_stdio(FILE *f, int fmode, VALUE klass, const char *path)
 {
     rb_io_t *fptr;
-    VALUE io = prep_io(fileno(f), fmode|FMODE_PREP|DEFAULT_TEXTMODE, klass, path);
+    VALUE io = prep_io(fileno(f), fmode|FMODE_EXTERNAL|DEFAULT_TEXTMODE, klass, path);
 
     GetOpenFile(io, fptr);
     fptr->encs.ecflags |= ECONV_DEFAULT_NEWLINE_DECORATOR;
@@ -9266,7 +9241,7 @@ rb_io_stdio_file(rb_io_t *fptr)
 }
 
 static inline void
-rb_io_buffer_init(rb_io_buffer_t *buf)
+rb_io_buffer_init(struct rb_io_internal_buffer *buf)
 {
     buf->ptr = NULL;
     buf->off = 0;
@@ -9369,7 +9344,7 @@ rb_io_initialize(int argc, VALUE *argv, VALUE io)
     VALUE fnum, vmode;
     rb_io_t *fp;
     int fd, fmode, oflags = O_RDONLY;
-    convconfig_t convconfig;
+    struct rb_io_encoding convconfig;
     VALUE opt;
 #if defined(HAVE_FCNTL) && defined(F_GETFL)
     int ofmode;
@@ -9406,7 +9381,7 @@ rb_io_initialize(int argc, VALUE *argv, VALUE io)
 
     if (!NIL_P(opt)) {
         if (rb_hash_aref(opt, sym_autoclose) == Qfalse) {
-            fmode |= FMODE_PREP;
+            fmode |= FMODE_EXTERNAL;
         }
 
         path = rb_hash_aref(opt, RB_ID2SYM(idPath));
@@ -9583,7 +9558,7 @@ rb_io_autoclose_p(VALUE io)
 {
     rb_io_t *fptr = RFILE(io)->fptr;
     rb_io_check_closed(fptr);
-    return RBOOL(!(fptr->mode & FMODE_PREP));
+    return RBOOL(!(fptr->mode & FMODE_EXTERNAL));
 }
 
 /*
@@ -9592,11 +9567,11 @@ rb_io_autoclose_p(VALUE io)
  *
  *  Sets auto-close flag.
  *
- *     f = open("/dev/null")
+ *     f = File.open(File::NULL)
  *     IO.for_fd(f.fileno).close
  *     f.gets # raises Errno::EBADF
  *
- *     f = open("/dev/null")
+ *     f = File.open(File::NULL)
  *     g = IO.for_fd(f.fileno)
  *     g.autoclose = false
  *     g.close
@@ -9609,9 +9584,9 @@ rb_io_set_autoclose(VALUE io, VALUE autoclose)
     rb_io_t *fptr;
     GetOpenFile(io, fptr);
     if (!RTEST(autoclose))
-        fptr->mode |= FMODE_PREP;
+        fptr->mode |= FMODE_EXTERNAL;
     else
-        fptr->mode &= ~FMODE_PREP;
+        fptr->mode &= ~FMODE_EXTERNAL;
     return autoclose;
 }
 
@@ -9744,7 +9719,7 @@ wait_mode_sym(VALUE mode)
     rb_raise(rb_eArgError, "unsupported mode: %"PRIsVALUE, mode);
 }
 
-static inline rb_io_event_t
+static inline enum rb_io_event
 io_event_from_value(VALUE value)
 {
     int events = RB_NUM2INT(value);
@@ -9775,7 +9750,7 @@ static VALUE
 io_wait(int argc, VALUE *argv, VALUE io)
 {
     VALUE timeout = Qundef;
-    rb_io_event_t events = 0;
+    enum rb_io_event events = 0;
     int return_io = 0;
 
     // The documented signature for this method is actually incorrect.
@@ -11872,9 +11847,6 @@ io_s_foreach(VALUE v)
  *    IO.foreach(path, sep = $/, **opts) {|line| block }       -> nil
  *    IO.foreach(path, limit, **opts) {|line| block }          -> nil
  *    IO.foreach(path, sep, limit, **opts) {|line| block }     -> nil
- *    IO.foreach(command, sep = $/, **opts) {|line| block }    -> nil
- *    IO.foreach(command, limit, **opts) {|line| block }       -> nil
- *    IO.foreach(command, sep, limit, **opts) {|line| block }  -> nil
  *    IO.foreach(...)                                          -> an_enumerator
  *
  *  Calls the block with each successive line read from the stream.
@@ -11883,16 +11855,7 @@ io_s_foreach(VALUE v)
  *  this method has potential security vulnerabilities if called with untrusted input;
  *  see {Command Injection}[rdoc-ref:command_injection.rdoc].
  *
- *  The first argument must be a string that is one of the following:
- *
- *  - Path: if +self+ is a subclass of \IO (\File, for example),
- *    or if the string _does_ _not_ start with the pipe character (<tt>'|'</tt>),
- *    the string is the path to a file.
- *  - Command: if +self+ is the class \IO,
- *    and if the string starts with the pipe character,
- *    the rest of the string is a command to be executed as a subprocess.
- *    This usage has potential security vulnerabilities if called with untrusted input;
- *    see {Command Injection}[rdoc-ref:command_injection.rdoc].
+ *  The first argument must be a string that is the path to a file.
  *
  *  With only argument +path+ given, parses lines from the file at the given +path+,
  *  as determined by the default line separator,
@@ -11953,7 +11916,7 @@ io_s_foreach(VALUE v)
  *
  *  - {Open Options}[rdoc-ref:IO@Open+Options].
  *  - {Encoding options}[rdoc-ref:encodings.rdoc@Encoding+Options].
- *  - {Line Options}[rdoc-ref:IO@Line+Options].
+ *  - {Line Options}[rdoc-ref:IO@Line+IO].
  *
  *  Returns an Enumerator if no block is given.
  *
@@ -11986,9 +11949,6 @@ io_s_readlines(VALUE v)
 
 /*
  *  call-seq:
- *     IO.readlines(command, sep = $/, **opts)     -> array
- *     IO.readlines(command, limit, **opts)      -> array
- *     IO.readlines(command, sep, limit, **opts) -> array
  *     IO.readlines(path, sep = $/, **opts)     -> array
  *     IO.readlines(path, limit, **opts)      -> array
  *     IO.readlines(path, sep, limit, **opts) -> array
@@ -11999,19 +11959,7 @@ io_s_readlines(VALUE v)
  *  this method has potential security vulnerabilities if called with untrusted input;
  *  see {Command Injection}[rdoc-ref:command_injection.rdoc].
  *
- *  The first argument must be a string;
- *  its meaning depends on whether it starts with the pipe character (<tt>'|'</tt>):
- *
- *  - If so (and if +self+ is \IO),
- *    the rest of the string is a command to be executed as a subprocess.
- *  - Otherwise, the string is the path to a file.
- *
- *  With only argument +command+ given, executes the command in a shell,
- *  parses its $stdout into lines, as determined by the default line separator,
- *  and returns those lines in an array:
- *
- *    IO.readlines('| cat t.txt')
- *    # => ["First line\n", "Second line\n", "\n", "Third line\n", "Fourth line\n"]
+ *  The first argument must be a string that is the path to a file.
  *
  *  With only argument +path+ given, parses lines from the file at the given +path+,
  *  as determined by the default line separator,
@@ -12019,8 +11967,6 @@ io_s_readlines(VALUE v)
  *
  *    IO.readlines('t.txt')
  *    # => ["First line\n", "Second line\n", "\n", "Third line\n", "Fourth line\n"]
- *
- *  For both forms, command and path, the remaining arguments are the same.
  *
  *  With argument +sep+ given, parses lines as determined by that line separator
  *  (see {Line Separator}[rdoc-ref:IO@Line+Separator]):
@@ -12051,7 +11997,7 @@ io_s_readlines(VALUE v)
  *
  *  - {Open Options}[rdoc-ref:IO@Open+Options].
  *  - {Encoding options}[rdoc-ref:encodings.rdoc@Encoding+Options].
- *  - {Line Options}[rdoc-ref:IO@Line+Options].
+ *  - {Line Options}[rdoc-ref:IO@Line+IO].
  *
  */
 
@@ -12094,7 +12040,6 @@ seek_before_access(VALUE argp)
 
 /*
  *  call-seq:
- *     IO.read(command, length = nil, offset = 0, **opts) -> string or nil
  *     IO.read(path, length = nil, offset = 0, **opts)    -> string or nil
  *
  *  Opens the stream, reads and returns some or all of its content,
@@ -12104,18 +12049,7 @@ seek_before_access(VALUE argp)
  *  this method has potential security vulnerabilities if called with untrusted input;
  *  see {Command Injection}[rdoc-ref:command_injection.rdoc].
  *
- *  The first argument must be a string;
- *  its meaning depends on whether it starts with the pipe character (<tt>'|'</tt>):
- *
- *  - If so (and if +self+ is \IO),
- *    the rest of the string is a command to be executed as a subprocess.
- *  - Otherwise, the string is the path to a file.
- *
- *  With only argument +command+ given, executes the command in a shell,
- *  returns its entire $stdout:
- *
- *    IO.read('| cat t.txt')
- *    # => "First line\nSecond line\n\nThird line\nFourth line\n"
+ *  The first argument must be a string that is the path to a file.
  *
  *  With only argument +path+ given, reads in text mode and returns the entire content
  *  of the file at the given path:
@@ -12126,8 +12060,6 @@ seek_before_access(VALUE argp)
  *  On Windows, text mode can terminate reading and leave bytes in the file
  *  unread when encountering certain special bytes. Consider using
  *  IO.binread if all bytes in the file should be read.
- *
- *  For both forms, command and path, the remaining arguments are the same.
  *
  *  With argument +length+, returns +length+ bytes if available:
  *
@@ -12179,7 +12111,6 @@ rb_io_s_read(int argc, VALUE *argv, VALUE io)
 
 /*
  *  call-seq:
- *     IO.binread(command, length = nil, offset = 0) -> string or nil
  *     IO.binread(path, length = nil, offset = 0)    -> string or nil
  *
  *  Behaves like IO.read, except that the stream is opened in binary mode
@@ -12203,7 +12134,7 @@ rb_io_s_binread(int argc, VALUE *argv, VALUE io)
                 |O_BINARY
 #endif
     };
-    convconfig_t convconfig = {NULL, NULL, 0, Qnil};
+    struct rb_io_encoding convconfig = {NULL, NULL, 0, Qnil};
 
     rb_scan_args(argc, argv, "12", NULL, NULL, &offset);
     FilePathValue(argv[0]);
@@ -12284,7 +12215,6 @@ io_s_write(int argc, VALUE *argv, VALUE klass, int binary)
 
 /*
  *  call-seq:
- *    IO.write(command, data, **opts)             -> integer
  *    IO.write(path, data, offset = 0, **opts)    -> integer
  *
  *  Opens the stream, writes the given +data+ to it,
@@ -12294,25 +12224,9 @@ io_s_write(int argc, VALUE *argv, VALUE klass, int binary)
  *  this method has potential security vulnerabilities if called with untrusted input;
  *  see {Command Injection}[rdoc-ref:command_injection.rdoc].
  *
- *  The first argument must be a string;
- *  its meaning depends on whether it starts with the pipe character (<tt>'|'</tt>):
+ *  The first argument must be a string that is the path to a file.
  *
- *  - If so (and if +self+ is \IO),
- *    the rest of the string is a command to be executed as a subprocess.
- *  - Otherwise, the string is the path to a file.
- *
- *  With argument +command+ given, executes the command in a shell,
- *  passes +data+ through standard input, writes its output to $stdout,
- *  and returns the length of the given +data+:
- *
- *    IO.write('| cat', 'Hello World!') # => 12
- *
- *  Output:
- *
- *    Hello World!
- *
- *  With argument +path+ given, writes the given +data+ to the file
- *  at that path:
+ *  With only argument +path+ given, writes the given +data+ to the file at that path:
  *
  *    IO.write('t.tmp', 'abc')    # => 3
  *    File.read('t.tmp')          # => "abc"
@@ -12351,7 +12265,6 @@ rb_io_s_write(int argc, VALUE *argv, VALUE io)
 
 /*
  *  call-seq:
- *    IO.binwrite(command, string, offset = 0) -> integer
  *    IO.binwrite(path, string, offset = 0)    -> integer
  *
  *  Behaves like IO.write, except that the stream is opened in binary mode
@@ -14442,7 +14355,7 @@ argf_closed(VALUE argf)
 {
     next_argv();
     ARGF_FORWARD(0, 0);
-    return rb_io_closed(ARGF.current_file);
+    return rb_io_closed_p(ARGF.current_file);
 }
 
 /*
@@ -15489,7 +15402,7 @@ Init_IO(void)
     rb_define_method(rb_cIO, "close_on_exec=", rb_io_set_close_on_exec, 1);
 
     rb_define_method(rb_cIO, "close", rb_io_close_m, 0);
-    rb_define_method(rb_cIO, "closed?", rb_io_closed, 0);
+    rb_define_method(rb_cIO, "closed?", rb_io_closed_p, 0);
     rb_define_method(rb_cIO, "close_read", rb_io_close_read, 0);
     rb_define_method(rb_cIO, "close_write", rb_io_close_write, 0);
 

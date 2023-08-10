@@ -289,7 +289,7 @@ module IRB # :nodoc:
           alias_method to, from
         }
       else
-        Kernel.print "irb: warn: can't alias #{to} from #{from}.\n"
+        Kernel.warn "irb: warn: can't alias #{to} from #{from}.\n"
       end
     end
 
@@ -316,10 +316,9 @@ module IRB # :nodoc:
     CE = ContextExtender # :nodoc:
 
     @EXTEND_COMMANDS = [
-      [:eval_history=, "ext/history.rb"],
+      [:eval_history=, "ext/eval_history.rb"],
       [:use_tracer=, "ext/tracer.rb"],
       [:use_loader=, "ext/use-loader.rb"],
-      [:save_history=, "ext/save-history.rb"],
     ]
 
     # Installs the default context extensions as irb commands:
@@ -327,7 +326,6 @@ module IRB # :nodoc:
     # Context#eval_history=::   +irb/ext/history.rb+
     # Context#use_tracer=::     +irb/ext/tracer.rb+
     # Context#use_loader=::     +irb/ext/use-loader.rb+
-    # Context#save_history=::   +irb/ext/save-history.rb+
     def self.install_extend_commands
       for args in @EXTEND_COMMANDS
         def_extend_command(*args)

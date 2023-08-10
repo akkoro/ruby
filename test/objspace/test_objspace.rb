@@ -281,6 +281,8 @@ class TestObjSpace < Test::Unit::TestCase
   end
 
   def test_dump_flags
+    # Ensure that the fstring is promoted to old generation
+    4.times { GC.start }
     info = ObjectSpace.dump("foo".freeze)
     assert_match(/"wb_protected":true, "old":true/, info)
     assert_match(/"fstring":true/, info)
@@ -630,7 +632,13 @@ class TestObjSpace < Test::Unit::TestCase
       end
     end
 
-    entry_hash = JSON.parse(test_string_in_dump_all[1])
+    strs = test_string_in_dump_all.reject do |s|
+      s.include?("fstring")
+    end
+
+    assert_equal(1, strs.length)
+
+    entry_hash = JSON.parse(strs[0])
 
     assert_equal(5, entry_hash["bytesize"], "bytesize is wrong")
     assert_equal("TEST2", entry_hash["value"], "value is wrong")

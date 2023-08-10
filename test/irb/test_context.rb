@@ -6,7 +6,7 @@ require 'rubygems' if defined?(Gem)
 require_relative "helper"
 
 module TestIRB
-  class TestContext < TestCase
+  class ContextTest < TestCase
     def setup
       IRB.init_config(nil)
       IRB.conf[:USE_SINGLELINE] = false
@@ -35,20 +35,6 @@ module TestIRB
       @context.set_last_value(obj)
       assert_same(obj, @context.last_value)
       assert_same(obj, @context.evaluate('_', 1))
-    end
-
-    def test_evaluate_with_exception
-      assert_nil(@context.evaluate("$!", 1))
-      e = assert_raise_with_message(RuntimeError, 'foo') {
-        @context.evaluate("raise 'foo'", 1)
-      }
-      assert_equal('foo', e.message)
-      assert_same(e, @context.evaluate('$!', 1, exception: e))
-      e = assert_raise(SyntaxError) {
-        @context.evaluate("1,2,3", 1, exception: e)
-      }
-      assert_match(/\A\(irb\):1:/, e.message)
-      assert_not_match(/rescue _\.class/, e.message)
     end
 
     def test_evaluate_with_encoding_error_without_lineno

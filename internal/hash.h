@@ -28,10 +28,6 @@ enum ruby_rhash_flags {
     RHASH_AR_TABLE_BOUND_MASK = (FL_USER8|FL_USER9|FL_USER10|FL_USER11), /* FL 8..11 */
     RHASH_AR_TABLE_BOUND_SHIFT = (FL_USHIFT+8),
 
-#if USE_TRANSIENT_HEAP
-    RHASH_TRANSIENT_FLAG = FL_USER12,                                    /* FL 12 */
-#endif
-
     // we can not put it in "enum" because it can exceed "int" range.
 #define RHASH_LEV_MASK (FL_USER13 | FL_USER14 | FL_USER15 |                /* FL 13..19 */ \
                         FL_USER16 | FL_USER17 | FL_USER18 | FL_USER19)
@@ -128,12 +124,14 @@ RHASH_AR_TABLE_P(VALUE h)
     return ! FL_TEST_RAW(h, RHASH_ST_TABLE_FLAG);
 }
 
+RBIMPL_ATTR_RETURNS_NONNULL()
 static inline struct ar_table_struct *
 RHASH_AR_TABLE(VALUE h)
 {
     return (struct ar_table_struct *)((uintptr_t)h + sizeof(struct RHash));
 }
 
+RBIMPL_ATTR_RETURNS_NONNULL()
 static inline st_table *
 RHASH_ST_TABLE(VALUE h)
 {

@@ -28,7 +28,7 @@
 #include "internal/file.h"
 #include "internal/gc.h"
 #include "internal/hash.h"
-#include "internal/parse.h"
+#include "internal/ruby_parser.h"
 #include "internal/sanitizers.h"
 #include "internal/symbol.h"
 #include "internal/thread.h"
@@ -170,9 +170,9 @@ rb_iseq_free(const rb_iseq_t *iseq)
 #endif
         ruby_xfree((void *)body->iseq_encoded);
         ruby_xfree((void *)body->insns_info.body);
-        if (body->insns_info.positions) ruby_xfree((void *)body->insns_info.positions);
+        ruby_xfree((void *)body->insns_info.positions);
 #if VM_INSN_INFO_TABLE_IMPL == 2
-        if (body->insns_info.succ_index_table) ruby_xfree(body->insns_info.succ_index_table);
+        ruby_xfree(body->insns_info.succ_index_table);
 #endif
         if (LIKELY(body->local_table != rb_iseq_shared_exc_local_tbl))
             ruby_xfree((void *)body->local_table);
@@ -282,6 +282,29 @@ rb_iseq_mark_and_move_each_value(const rb_iseq_t *iseq, VALUE *original_iseq)
     }
 }
 
+static bool
+cc_is_active(const struct rb_callcache *cc, bool reference_updating)
+{
+    if (cc) {
+        if (reference_updating) {
+            cc = (const struct rb_callcache *)rb_gc_location((VALUE)cc);
+        }
+
+        if (vm_cc_markable(cc)) {
+            if (cc->klass) { // cc is not invalidated
+                const struct rb_callable_method_entry_struct *cme = vm_cc_cme(cc);
+                if (reference_updating) {
+                    cme = (const struct rb_callable_method_entry_struct *)rb_gc_location((VALUE)cme);
+                }
+                if (!METHOD_ENTRY_INVALIDATED(cme)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 void
 rb_iseq_mark_and_move(rb_iseq_t *iseq, bool reference_updating)
 {
@@ -310,27 +333,11 @@ rb_iseq_mark_and_move(rb_iseq_t *iseq, bool reference_updating)
 
                 if (cds[i].ci) rb_gc_mark_and_move_ptr(&cds[i].ci);
 
-                const struct rb_callcache *cc = cds[i].cc;
-                if (cc) {
-                    if (reference_updating) {
-                        cc = (const struct rb_callcache *)rb_gc_location((VALUE)cc);
-                    }
-
-                    if (vm_cc_markable(cc)) {
-                        VM_ASSERT((cc->flags & VM_CALLCACHE_ON_STACK) == 0);
-
-                        const struct rb_callable_method_entry_struct *cme = vm_cc_cme(cc);
-                        if (reference_updating) {
-                            cme = (const struct rb_callable_method_entry_struct *)rb_gc_location((VALUE)cme);
-                        }
-
-                        if (cc->klass && !METHOD_ENTRY_INVALIDATED(cme)) {
-                            rb_gc_mark_and_move_ptr(&cds[i].cc);
-                        }
-                        else {
-                            cds[i].cc = rb_vm_empty_cc();
-                        }
-                    }
+                if (cc_is_active(cds[i].cc, reference_updating)) {
+                    rb_gc_mark_and_move_ptr(&cds[i].cc);
+                }
+                else {
+                    cds[i].cc = rb_vm_empty_cc();
                 }
             }
         }
@@ -706,7 +713,6 @@ static rb_compile_option_t COMPILE_OPTION_DEFAULT = {
     OPT_SPECIALISED_INSTRUCTION, /* int specialized_instruction; */
     OPT_OPERANDS_UNIFICATION, /* int operands_unification; */
     OPT_INSTRUCTIONS_UNIFICATION, /* int instructions_unification; */
-    OPT_STACK_CACHING, /* int stack_caching; */
     OPT_FROZEN_STRING_LITERAL,
     OPT_DEBUG_FROZEN_STRING_LITERAL,
     TRUE,			/* coverage_enabled */
@@ -732,13 +738,21 @@ set_compile_option_from_hash(rb_compile_option_t *option, VALUE opt)
     SET_COMPILE_OPTION(option, opt, specialized_instruction);
     SET_COMPILE_OPTION(option, opt, operands_unification);
     SET_COMPILE_OPTION(option, opt, instructions_unification);
-    SET_COMPILE_OPTION(option, opt, stack_caching);
     SET_COMPILE_OPTION(option, opt, frozen_string_literal);
     SET_COMPILE_OPTION(option, opt, debug_frozen_string_literal);
     SET_COMPILE_OPTION(option, opt, coverage_enabled);
     SET_COMPILE_OPTION_NUM(option, opt, debug_level);
 #undef SET_COMPILE_OPTION
 #undef SET_COMPILE_OPTION_NUM
+}
+
+static VALUE
+make_compile_option_from_ast(const rb_ast_body_t *ast)
+{
+    VALUE opt = rb_obj_hide(rb_ident_hash_new());
+    if (ast->frozen_string_literal >= 0) rb_hash_aset(opt, rb_sym_intern_ascii_cstr("frozen_string_literal"), RBOOL(ast->frozen_string_literal));
+    if (ast->coverage_enabled >= 0) rb_hash_aset(opt, rb_sym_intern_ascii_cstr("coverage_enabled"), RBOOL(ast->coverage_enabled));
+    return opt;
 }
 
 static void
@@ -786,7 +800,6 @@ make_compile_option_value(rb_compile_option_t *option)
         SET_COMPILE_OPTION(option, opt, specialized_instruction);
         SET_COMPILE_OPTION(option, opt, operands_unification);
         SET_COMPILE_OPTION(option, opt, instructions_unification);
-        SET_COMPILE_OPTION(option, opt, stack_caching);
         SET_COMPILE_OPTION(option, opt, frozen_string_literal);
         SET_COMPILE_OPTION(option, opt, debug_frozen_string_literal);
         SET_COMPILE_OPTION(option, opt, coverage_enabled);
@@ -908,7 +921,7 @@ rb_iseq_new_with_opt(const rb_ast_body_t *ast, VALUE name, VALUE path, VALUE rea
     else {
         new_opt = COMPILE_OPTION_DEFAULT;
     }
-    if (ast && ast->compile_option) rb_iseq_make_compile_option(&new_opt, ast->compile_option);
+    if (ast) rb_iseq_make_compile_option(&new_opt, make_compile_option_from_ast(ast));
 
     VALUE script_lines = Qnil;
 
@@ -1422,7 +1435,6 @@ iseqw_s_compile_file(int argc, VALUE *argv, VALUE self)
  *  * +:operands_unification+
  *  * +:peephole_optimization+
  *  * +:specialized_instruction+
- *  * +:stack_caching+
  *  * +:tailcall_optimization+
  *
  *  Additionally, +:debug_level+ can be set to an integer.
@@ -2207,7 +2219,7 @@ rb_iseq_disasm_insn(VALUE ret, const VALUE *code, size_t pos,
     {
         rb_event_flag_t events = rb_iseq_event_flags(iseq, pos);
         if (events) {
-            str = rb_str_catf(str, "[%s%s%s%s%s%s%s%s%s%s%s]",
+            str = rb_str_catf(str, "[%s%s%s%s%s%s%s%s%s%s%s%s]",
                               events & RUBY_EVENT_LINE     ? "Li" : "",
                               events & RUBY_EVENT_CLASS    ? "Cl" : "",
                               events & RUBY_EVENT_END      ? "En" : "",
@@ -2217,6 +2229,7 @@ rb_iseq_disasm_insn(VALUE ret, const VALUE *code, size_t pos,
                               events & RUBY_EVENT_C_RETURN ? "Cr" : "",
                               events & RUBY_EVENT_B_CALL   ? "Bc" : "",
                               events & RUBY_EVENT_B_RETURN ? "Br" : "",
+                              events & RUBY_EVENT_RESCUE   ? "Rs" : "",
                               events & RUBY_EVENT_COVERAGE_LINE   ? "Cli" : "",
                               events & RUBY_EVENT_COVERAGE_BRANCH ? "Cbr" : "");
         }
@@ -2561,6 +2574,7 @@ push_event_info(const rb_iseq_t *iseq, rb_event_flag_t events, int line, VALUE a
     C(RUBY_EVENT_END,      "end",      INT2FIX(line));
     C(RUBY_EVENT_RETURN,   "return",   INT2FIX(line));
     C(RUBY_EVENT_B_RETURN, "b_return", INT2FIX(line));
+    C(RUBY_EVENT_RESCUE,    "rescue",  INT2FIX(line));
 #undef C
 }
 
@@ -3078,6 +3092,7 @@ iseq_data_to_ary(const rb_iseq_t *iseq)
             CHECK_EVENT(RUBY_EVENT_RETURN);
             CHECK_EVENT(RUBY_EVENT_B_CALL);
             CHECK_EVENT(RUBY_EVENT_B_RETURN);
+            CHECK_EVENT(RUBY_EVENT_RESCUE);
 #undef CHECK_EVENT
             prev_insn_info = info;
         }

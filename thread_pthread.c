@@ -617,7 +617,6 @@ rb_thread_sched_init(struct rb_thread_sched *sched)
     sched->wait_yield = 0;
 }
 
-#if 0
 // TODO
 
 static void clear_thread_cache_altstack(void);
@@ -637,7 +636,6 @@ rb_thread_sched_destroy(struct rb_thread_sched *sched)
     }
     clear_thread_cache_altstack();
 }
-#endif
 
 #if defined(HAVE_WORKING_FORK)
 static void thread_cache_reset(void);
@@ -739,7 +737,7 @@ Init_native_thread(rb_thread_t *main_th)
         rb_bug("pthread_key_create failed (ruby_current_ec_key)");
     }
 #endif
-    posix_signal(SIGVTALRM, null_func);
+    ruby_posix_signal(SIGVTALRM, null_func);
 
     // setup main thread
     main_th->nt->thread_id = pthread_self();
@@ -747,8 +745,12 @@ Init_native_thread(rb_thread_t *main_th)
     native_thread_init(main_th->nt);
 }
 
-#ifndef USE_THREAD_CACHE
-#define USE_THREAD_CACHE 1
+#if defined(USE_THREAD_CACHE) && !(USE_THREAD_CACHE+0)
+# undef USE_THREAD_CACHE
+# define USE_THREAD_CACHE 0
+#else
+# undef USE_THREAD_CACHE
+# define USE_THREAD_CACHE 1
 #endif
 
 static void
@@ -771,6 +773,8 @@ native_thread_destroy(rb_thread_t *th)
 
 #if USE_THREAD_CACHE
 static rb_thread_t *register_cached_thread_and_wait(void *);
+#else
+# define register_cached_thread_and_wait(altstack) ((void)(altstack), NULL)
 #endif
 
 #if defined HAVE_PTHREAD_GETATTR_NP || defined HAVE_PTHREAD_ATTR_GET_NP
@@ -1092,10 +1096,7 @@ thread_start_func_1(void *th_ptr)
 #endif
 
     RB_ALTSTACK_INIT(void *altstack, th->nt->altstack);
-#if USE_THREAD_CACHE
-  thread_start:
-#endif
-    {
+    do {
 #if !defined USE_NATIVE_THREAD_INIT
         VALUE stack_start;
 #endif
@@ -1114,15 +1115,10 @@ thread_start_func_1(void *th_ptr)
 #else
         thread_start_func_2(th, &stack_start);
 #endif
+    } while ((th = register_cached_thread_and_wait(RB_ALTSTACK(altstack))) != 0);
+    if (!USE_THREAD_CACHE) {
+        RB_ALTSTACK_FREE(altstack);
     }
-#if USE_THREAD_CACHE
-    /* cache thread */
-    if ((th = register_cached_thread_and_wait(RB_ALTSTACK(altstack))) != 0) {
-        goto thread_start;
-    }
-#else
-    RB_ALTSTACK_FREE(altstack);
-#endif
     return 0;
 }
 
@@ -1191,12 +1187,15 @@ register_cached_thread_and_wait(void *altstack)
 #  if defined(HAVE_WORKING_FORK)
 static void thread_cache_reset(void) { }
 #  endif
+#define thread_cache_lock *(rb_nativethread_lock_t *)NULL
+#define cached_thread_head *(struct ccan_list_head *)NULL
 #endif
 
 static int
 use_cached_thread(rb_thread_t *th)
 {
-#if USE_THREAD_CACHE
+    if (!USE_THREAD_CACHE) return 0;
+
     struct cached_thread_entry *entry;
 
     rb_native_mutex_lock(&thread_cache_lock);
@@ -1209,16 +1208,14 @@ use_cached_thread(rb_thread_t *th)
     }
     rb_native_mutex_unlock(&thread_cache_lock);
     return !!entry;
-#endif
-    return 0;
 }
 
-#if 0
 // TODO
 static void
 clear_thread_cache_altstack(void)
 {
-#if USE_THREAD_CACHE
+    if (!USE_THREAD_CACHE) return;
+
     struct cached_thread_entry *entry;
 
     rb_native_mutex_lock(&thread_cache_lock);
@@ -1228,9 +1225,7 @@ clear_thread_cache_altstack(void)
         RB_ALTSTACK_FREE(altstack);
     }
     rb_native_mutex_unlock(&thread_cache_lock);
-#endif
 }
-#endif
 
 static struct rb_native_thread *
 native_thread_alloc(void)

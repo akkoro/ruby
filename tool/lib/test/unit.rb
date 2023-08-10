@@ -346,7 +346,8 @@ module Test
           options[:retry] = false
         end
 
-        opts.on '--ruby VAL', "Path to ruby which is used at -j option" do |a|
+        opts.on '--ruby VAL', "Path to ruby which is used at -j option",
+                "Also used as EnvUtil.rubybin by some assertion methods" do |a|
           options[:ruby] = a.split(/ /).reject(&:empty?)
         end
 
@@ -813,6 +814,7 @@ module Test
             warn ""
             @warnings.uniq! {|w| w[1].message}
             @warnings.each do |w|
+              @errors += 1
               warn "#{w[0]}: #{w[1].message} (#{w[1].class})"
             end
             warn ""
@@ -1282,7 +1284,12 @@ module Test
             puts "#{f}: #{$!}"
           end
         }
+        @load_failed = errors.size.nonzero?
         result
+      end
+
+      def run(*)
+        super or @load_failed
       end
     end
 
@@ -1680,7 +1687,7 @@ module Test
           break unless report.empty?
         end
 
-        return failures + errors if self.test_count > 0 # or return nil...
+        return (failures + errors).nonzero? # or return nil...
       rescue Interrupt
         abort 'Interrupted'
       end

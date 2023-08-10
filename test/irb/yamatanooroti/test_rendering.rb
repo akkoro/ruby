@@ -8,7 +8,7 @@ rescue LoadError, NameError
   return
 end
 
-class IRB::TestRendering < Yamatanooroti::TestCase
+class IRB::RenderingTest < Yamatanooroti::TestCase
   def setup
     @pwd = Dir.pwd
     suffix = '%010d' % Random.rand(0..65535)
@@ -80,7 +80,7 @@ class IRB::TestRendering < Yamatanooroti::TestCase
       irb(main):008:0>
       irb(main):009:0> a
       irb(main):010:0>  .a
-      irb(main):011:0>  .b
+      irb(main):011:0> .b
       => true
       irb(main):012:0>
     EOC
@@ -152,7 +152,7 @@ class IRB::TestRendering < Yamatanooroti::TestCase
       irb(main):023:0>   .c
       => true
       irb(main):024:0> (a)
-      irb(main):025:0>   &.b()
+      irb(main):025:0> &.b()
       => #<A>
       irb(main):026:0>
     EOC
@@ -176,7 +176,7 @@ class IRB::TestRendering < Yamatanooroti::TestCase
   end
 
   def test_autocomplete_with_showdoc_in_gaps_on_narrow_screen_right
-    pend "Needs a dummy document to show doc"
+    omit if Gem::Version.new(RUBY_VERSION) < Gem::Version.new('3.1')
     write_irbrc <<~'LINES'
       IRB.conf[:PROMPT][:MY_PROMPT] = {
         :PROMPT_I => "%03n> ",
@@ -190,16 +190,28 @@ class IRB::TestRendering < Yamatanooroti::TestCase
     start_terminal(4, 19, %W{ruby -I/home/aycabta/ruby/reline/lib -I#{@pwd}/lib #{@pwd}/exe/irb}, startup_message: 'start IRB')
     write("Str\C-i")
     close
-    assert_screen(<<~EOC)
-      001> String
-            StringPress A
-            StructString
-                  of byte
-    EOC
+
+    # This is because on macOS we display different shortcut for displaying the full doc
+    # 'O' is for 'Option' and 'A' is for 'Alt'
+    if RUBY_PLATFORM =~ /darwin/
+      assert_screen(<<~EOC)
+        start IRB
+        001> String
+             StringPress O
+             StructString
+      EOC
+    else
+      assert_screen(<<~EOC)
+        start IRB
+        001> String
+             StringPress A
+             StructString
+      EOC
+    end
   end
 
   def test_autocomplete_with_showdoc_in_gaps_on_narrow_screen_left
-    pend "Needs a dummy document to show doc"
+    omit if Gem::Version.new(RUBY_VERSION) < Gem::Version.new('3.1')
     write_irbrc <<~'LINES'
       IRB.conf[:PROMPT][:MY_PROMPT] = {
         :PROMPT_I => "%03n> ",
@@ -214,10 +226,10 @@ class IRB::TestRendering < Yamatanooroti::TestCase
     write("Str\C-i")
     close
     assert_screen(<<~EOC)
+      start IRB
       001> String
       PressString
       StrinStruct
-      of by
     EOC
   end
 
@@ -238,6 +250,72 @@ class IRB::TestRendering < Yamatanooroti::TestCase
       ...
       irb(main):002:0>
     EOC
+  end
+
+  def test_show_cmds_with_pager_can_quit_with_ctrl_c
+    write_irbrc <<~'LINES'
+      puts 'start IRB'
+    LINES
+    start_terminal(40, 80, %W{ruby -I#{@pwd}/lib #{@pwd}/exe/irb}, startup_message: 'start IRB')
+    write("show_cmds\n")
+    write("G") # move to the end of the screen
+    write("\C-c") # quit pager
+    write("'foo' + 'bar'\n") # eval something to make sure IRB resumes
+    close
+
+    screen = result.join("\n").sub(/\n*\z/, "\n")
+    # IRB::Abort should be rescued
+    assert_not_match(/IRB::Abort/, screen)
+    # IRB should resume
+    assert_match(/foobar/, screen)
+  end
+
+  def test_pager_page_content_pages_output_when_it_does_not_fit_in_the_screen_because_of_total_length
+    write_irbrc <<~'LINES'
+      puts 'start IRB'
+      require "irb/pager"
+    LINES
+    start_terminal(10, 80, %W{ruby -I#{@pwd}/lib #{@pwd}/exe/irb}, startup_message: 'start IRB')
+    write("IRB::Pager.page_content('a' * (80 * 8))\n")
+    write("'foo' + 'bar'\n") # eval something to make sure IRB resumes
+    close
+
+    screen = result.join("\n").sub(/\n*\z/, "\n")
+    assert_match(/a{80}/, screen)
+    # because pager is invoked, foobar will not be evaluated
+    assert_not_match(/foobar/, screen)
+  end
+
+  def test_pager_page_content_pages_output_when_it_does_not_fit_in_the_screen_because_of_screen_height
+    write_irbrc <<~'LINES'
+      puts 'start IRB'
+      require "irb/pager"
+    LINES
+    start_terminal(10, 80, %W{ruby -I#{@pwd}/lib #{@pwd}/exe/irb}, startup_message: 'start IRB')
+    write("IRB::Pager.page_content('a\n' * 8)\n")
+    write("'foo' + 'bar'\n") # eval something to make sure IRB resumes
+    close
+
+    screen = result.join("\n").sub(/\n*\z/, "\n")
+    assert_match(/(a\n){8}/, screen)
+    # because pager is invoked, foobar will not be evaluated
+    assert_not_match(/foobar/, screen)
+  end
+
+  def test_pager_page_content_doesnt_page_output_when_it_fits_in_the_screen
+    write_irbrc <<~'LINES'
+      puts 'start IRB'
+      require "irb/pager"
+    LINES
+    start_terminal(10, 80, %W{ruby -I#{@pwd}/lib #{@pwd}/exe/irb}, startup_message: 'start IRB')
+    write("IRB::Pager.page_content('a' * (80 * 7))\n")
+    write("'foo' + 'bar'\n") # eval something to make sure IRB resumes
+    close
+
+    screen = result.join("\n").sub(/\n*\z/, "\n")
+    assert_match(/a{80}/, screen)
+    # because pager is not invoked, foobar will be evaluated
+    assert_match(/foobar/, screen)
   end
 
   private

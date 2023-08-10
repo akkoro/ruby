@@ -2994,15 +2994,12 @@ module RubyVM::RJIT
     # @param ctx [RubyVM::RJIT::Context]
     # @param asm [RubyVM::RJIT::Assembler]
     def jit_rb_str_empty_p(jit, ctx, asm, argc, known_recv_class)
-      # Assume same offset to len embedded or not so we can use one code path to read the length
-      #assert_equal(C.RString.offsetof(:as, :heap, :len), C.RString.offsetof(:as, :embed, :len))
-
       recv_opnd = ctx.stack_pop(1)
       out_opnd = ctx.stack_push(Type::UnknownImm)
 
       asm.comment('get string length')
       asm.mov(:rax, recv_opnd)
-      str_len_opnd = [:rax, C.RString.offsetof(:as, :heap, :len)]
+      str_len_opnd = [:rax, C.RString.offsetof(:len)]
 
       asm.cmp(str_len_opnd, 0)
       asm.mov(:rax, Qfalse)
@@ -4556,7 +4553,8 @@ module RubyVM::RJIT
       # Check if we need the arg0 splat handling of vm_callee_setup_block_arg
       arg_setup_block = (calling.block_handler == :captured) # arg_setup_type: arg_setup_block (invokeblock)
       block_arg0_splat = arg_setup_block && argc == 1 &&
-        iseq.body.param.flags.has_lead && !iseq.body.param.flags.ambiguous_param0
+        (iseq.body.param.flags.has_lead || opt_num > 1) &&
+        !iseq.body.param.flags.ambiguous_param0
       if block_arg0_splat
         # If block_arg0_splat, we still need side exits after splat, but
         # doing push_splat_args here disallows it. So bail out.
@@ -4568,6 +4566,13 @@ module RubyVM::RJIT
         # but doing_kw_call means it's not a simple ISEQ.
         if doing_kw_call
           asm.incr_counter(:invokeblock_iseq_arg0_has_kw)
+          return CantCompile
+        end
+        # The block_arg0_splat implementation cannot deal with optional parameters.
+        # This is a setup_parameters_complex() situation and interacts with the
+        # starting position of the callee.
+        if opt_num > 1
+          asm.incr_counter(:invokeblock_iseq_arg0_optional)
           return CantCompile
         end
       end
@@ -5613,7 +5618,6 @@ module RubyVM::RJIT
       sp_reg = iseq ? SP : :rax
       asm.lea(sp_reg, [SP, C.VALUE.size * sp_offset])
       asm.mov([CFP, cfp_offset + C.rb_control_frame_t.offsetof(:sp)], sp_reg)
-      asm.mov([CFP, cfp_offset + C.rb_control_frame_t.offsetof(:__bp__)], sp_reg) # TODO: get rid of this!!
 
       # cfp->jit_return is used only for ISEQs
       if iseq
@@ -5805,7 +5809,7 @@ module RubyVM::RJIT
       asm.cmovz(len_reg, [array_reg, C.RArray.offsetof(:as, :heap, :len)])
     end
 
-    # Generate RARRAY_CONST_PTR_TRANSIENT (part of RARRAY_AREF)
+    # Generate RARRAY_CONST_PTR (part of RARRAY_AREF)
     def jit_array_ptr(asm, array_reg, ary_opnd) # clobbers array_reg
       asm.comment('get array pointer for embedded or heap')
 

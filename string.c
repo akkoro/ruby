@@ -82,7 +82,6 @@ VALUE rb_cSymbol;
  *
  * 1:     RSTRING_NOEMBED
  * 2:     STR_SHARED (== ELTS_SHARED)
- * 2-6:   RSTRING_EMBED_LEN (5 bits == 32)
  * 5:     STR_SHARED_ROOT (RSTRING_NOEMBED==1 && STR_SHARED == 0, there may be
  *                         other strings that rely on this string's buffer)
  * 6:     STR_BORROWED (when RSTRING_NOEMBED==1 && klass==0, unsafe to recycle
@@ -111,18 +110,9 @@ VALUE rb_cSymbol;
     FL_UNSET((str), STR_SHARED | STR_SHARED_ROOT | STR_BORROWED);\
 } while (0)
 #define STR_SET_EMBED(str) FL_UNSET((str), (STR_NOEMBED|STR_NOFREE))
-# define STR_SET_EMBED_LEN(str, n) do { \
-    assert(str_embed_capa(str) > (n));\
-    RSTRING(str)->as.embed.len = (n);\
-} while (0)
 
 #define STR_SET_LEN(str, n) do { \
-    if (STR_EMBED_P(str)) {\
-        STR_SET_EMBED_LEN((str), (n));\
-    }\
-    else {\
-        RSTRING(str)->as.heap.len = (n);\
-    }\
+    RSTRING(str)->len = (n); \
 } while (0)
 
 static inline bool
@@ -159,7 +149,7 @@ str_enc_fastpath(VALUE str)
             const long tlen = RSTRING_LEN(str);\
             memcpy(tmp, RSTRING_PTR(str), tlen);\
             RSTRING(str)->as.heap.ptr = tmp;\
-            RSTRING(str)->as.heap.len = tlen;\
+            RSTRING(str)->len = tlen;\
             STR_SET_NOEMBED(str);\
             RSTRING(str)->as.heap.aux.capa = (capacity);\
         }\
@@ -223,7 +213,7 @@ rb_str_size_as_embedded(VALUE str)
 {
     size_t real_size;
     if (STR_EMBED_P(str)) {
-        real_size = rb_str_embed_size(RSTRING(str)->as.embed.len) + TERM_LEN(str);
+        real_size = rb_str_embed_size(RSTRING(str)->len) + TERM_LEN(str);
     }
     /* if the string is not currently embedded, but it can be embedded, how
      * much space would it require */
@@ -276,10 +266,10 @@ rb_str_make_embedded(VALUE str)
     RUBY_ASSERT(!STR_EMBED_P(str));
 
     char *buf = RSTRING(str)->as.heap.ptr;
-    long len = RSTRING(str)->as.heap.len;
+    long len = RSTRING(str)->len;
 
     STR_SET_EMBED(str);
-    STR_SET_EMBED_LEN(str, len);
+    STR_SET_LEN(str, len);
 
     if (len > 0) {
         memcpy(RSTRING_PTR(str), buf, len);
@@ -383,13 +373,13 @@ fstr_update_callback(st_data_t *key, st_data_t *value, st_data_t data, int exist
     else {
         if (FL_TEST_RAW(str, STR_FAKESTR)) {
             if (arg->copy) {
-                VALUE new_str = str_new(rb_cString, RSTRING(str)->as.heap.ptr, RSTRING(str)->as.heap.len);
+                VALUE new_str = str_new(rb_cString, RSTRING(str)->as.heap.ptr, RSTRING(str)->len);
                 rb_enc_copy(new_str, str);
                 str = new_str;
             }
             else {
                 str = str_new_static(rb_cString, RSTRING(str)->as.heap.ptr,
-                                     RSTRING(str)->as.heap.len,
+                                     RSTRING(str)->len,
                                      ENCODING_GET(str));
             }
             OBJ_FREEZE_RAW(str);
@@ -487,7 +477,7 @@ setup_fake_str(struct RString *fake_str, const char *name, long len, int encidx)
     ENCODING_SET_INLINED((VALUE)fake_str, encidx);
 
     RBASIC_SET_CLASS_RAW((VALUE)fake_str, rb_cString);
-    fake_str->as.heap.len = len;
+    fake_str->len = len;
     fake_str->as.heap.ptr = (char *)name;
     fake_str->as.heap.aux.capa = len;
     return (VALUE)fake_str;
@@ -833,7 +823,7 @@ str_capacity(VALUE str, const int termlen)
         return str_embed_capa(str) - termlen;
     }
     else if (FL_TEST(str, STR_SHARED|STR_NOFREE)) {
-        return RSTRING(str)->as.heap.len;
+        return RSTRING(str)->len;
     }
     else {
         return RSTRING(str)->as.heap.aux.capa;
@@ -1013,7 +1003,7 @@ str_new_static(VALUE klass, const char *ptr, long len, int encindex)
     else {
         RUBY_DTRACE_CREATE_HOOK(STRING, len);
         str = str_alloc_heap(klass);
-        RSTRING(str)->as.heap.len = len;
+        RSTRING(str)->len = len;
         RSTRING(str)->as.heap.ptr = (char *)ptr;
         RSTRING(str)->as.heap.aux.capa = len;
         RBASIC(str)->flags |= STR_NOFREE;
@@ -1297,7 +1287,6 @@ str_replace_shared_without_enc(VALUE str2, VALUE str)
         char *ptr2 = RSTRING(str2)->as.embed.ary;
         STR_SET_EMBED(str2);
         memcpy(ptr2, RSTRING_PTR(str), len);
-        STR_SET_EMBED_LEN(str2, len);
         TERM_FILL(ptr2+len, termlen);
     }
     else {
@@ -1321,10 +1310,12 @@ str_replace_shared_without_enc(VALUE str2, VALUE str)
             }
         }
         FL_SET(str2, STR_NOEMBED);
-        RSTRING(str2)->as.heap.len = len;
         RSTRING(str2)->as.heap.ptr = ptr;
         STR_SET_SHARED(str2, root);
     }
+
+    STR_SET_LEN(str2, len);
+
     return str2;
 }
 
@@ -1384,7 +1375,7 @@ rb_str_tmp_frozen_release(VALUE orig, VALUE tmp)
 
         if (shared == tmp && !FL_TEST_RAW(tmp, STR_BORROWED)) {
             assert(RSTRING(orig)->as.heap.ptr == RSTRING(tmp)->as.heap.ptr);
-            assert(RSTRING(orig)->as.heap.len == RSTRING(tmp)->as.heap.len);
+            assert(RSTRING_LEN(orig) == RSTRING_LEN(tmp));
 
             /* Unshare orig since the root (tmp) only has this one child. */
             FL_UNSET_RAW(orig, STR_SHARED);
@@ -1394,7 +1385,7 @@ rb_str_tmp_frozen_release(VALUE orig, VALUE tmp)
 
             /* Make tmp embedded and empty so it is safe for sweeping. */
             STR_SET_EMBED(tmp);
-            STR_SET_EMBED_LEN(tmp, 0);
+            STR_SET_LEN(tmp, 0);
         }
     }
 }
@@ -1412,7 +1403,7 @@ heap_str_make_shared(VALUE klass, VALUE orig)
     assert(!STR_SHARED_P(orig));
 
     VALUE str = str_alloc_heap(klass);
-    RSTRING(str)->as.heap.len = RSTRING_LEN(orig);
+    STR_SET_LEN(str, RSTRING_LEN(orig));
     RSTRING(str)->as.heap.ptr = RSTRING_PTR(orig);
     RSTRING(str)->as.heap.aux.capa = RSTRING(orig)->as.heap.aux.capa;
     RBASIC(str)->flags |= RBASIC(orig)->flags & STR_NOFREE;
@@ -1439,7 +1430,7 @@ str_new_frozen_buffer(VALUE klass, VALUE orig, int copy_encoding)
         if (FL_TEST_RAW(orig, STR_SHARED)) {
             VALUE shared = RSTRING(orig)->as.heap.aux.shared;
             long ofs = RSTRING(orig)->as.heap.ptr - RSTRING_PTR(shared);
-            long rest = RSTRING_LEN(shared) - ofs - RSTRING(orig)->as.heap.len;
+            long rest = RSTRING_LEN(shared) - ofs - RSTRING_LEN(orig);
             assert(ofs >= 0);
             assert(rest >= 0);
             assert(ofs + rest <= RSTRING_LEN(shared));
@@ -1451,7 +1442,7 @@ str_new_frozen_buffer(VALUE klass, VALUE orig, int copy_encoding)
                 str = str_new_shared(klass, shared);
                 assert(!STR_EMBED_P(str));
                 RSTRING(str)->as.heap.ptr += ofs;
-                RSTRING(str)->as.heap.len -= ofs + rest;
+                STR_SET_LEN(str, RSTRING_LEN(str) - (ofs + rest));
             }
             else {
                 if (RBASIC_CLASS(shared) == 0)
@@ -1463,7 +1454,7 @@ str_new_frozen_buffer(VALUE klass, VALUE orig, int copy_encoding)
             str = str_alloc_embed(klass, RSTRING_LEN(orig) + TERM_LEN(orig));
             STR_SET_EMBED(str);
             memcpy(RSTRING_PTR(str), RSTRING_PTR(orig), RSTRING_LEN(orig));
-            STR_SET_EMBED_LEN(str, RSTRING_LEN(orig));
+            STR_SET_LEN(str, RSTRING_LEN(orig));
             TERM_FILL(RSTRING_END(str), TERM_LEN(orig));
         }
         else {
@@ -1592,23 +1583,24 @@ str_shared_replace(VALUE str, VALUE str2)
     str_discard(str);
     termlen = rb_enc_mbminlen(enc);
 
+    STR_SET_LEN(str, RSTRING_LEN(str2));
+
     if (str_embed_capa(str) >= RSTRING_LEN(str2) + termlen) {
         STR_SET_EMBED(str);
         memcpy(RSTRING_PTR(str), RSTRING_PTR(str2), (size_t)RSTRING_LEN(str2) + termlen);
-        STR_SET_EMBED_LEN(str, RSTRING_LEN(str2));
         rb_enc_associate(str, enc);
         ENC_CODERANGE_SET(str, cr);
     }
     else {
         if (STR_EMBED_P(str2)) {
             assert(!FL_TEST(str2, STR_SHARED));
-            long len = RSTRING(str2)->as.embed.len;
+            long len = RSTRING_LEN(str2);
             assert(len + termlen <= str_embed_capa(str2));
 
             char *new_ptr = ALLOC_N(char, len + termlen);
             memcpy(new_ptr, RSTRING(str2)->as.embed.ary, len + termlen);
             RSTRING(str2)->as.heap.ptr = new_ptr;
-            RSTRING(str2)->as.heap.len = len;
+            STR_SET_LEN(str2, len);
             RSTRING(str2)->as.heap.aux.capa = len;
             STR_SET_NOEMBED(str2);
         }
@@ -1616,7 +1608,6 @@ str_shared_replace(VALUE str, VALUE str2)
         STR_SET_NOEMBED(str);
         FL_UNSET(str, STR_SHARED);
         RSTRING(str)->as.heap.ptr = RSTRING_PTR(str2);
-        RSTRING(str)->as.heap.len = RSTRING_LEN(str2);
 
         if (FL_TEST(str2, STR_SHARED)) {
             VALUE shared = RSTRING(str2)->as.heap.aux.shared;
@@ -1629,7 +1620,7 @@ str_shared_replace(VALUE str, VALUE str2)
         /* abandon str2 */
         STR_SET_EMBED(str2);
         RSTRING_PTR(str2)[0] = 0;
-        STR_SET_EMBED_LEN(str2, 0);
+        STR_SET_LEN(str2, 0);
         rb_enc_associate(str, enc);
         ENC_CODERANGE_SET(str, cr);
     }
@@ -1665,7 +1656,7 @@ str_replace(VALUE str, VALUE str2)
         VALUE shared = RSTRING(str2)->as.heap.aux.shared;
         assert(OBJ_FROZEN(shared));
         STR_SET_NOEMBED(str);
-        RSTRING(str)->as.heap.len = len;
+        STR_SET_LEN(str, len);
         RSTRING(str)->as.heap.ptr = RSTRING_PTR(str2);
         STR_SET_SHARED(str, shared);
         rb_enc_cr_str_exact_copy(str, str2);
@@ -1709,11 +1700,10 @@ str_duplicate_setup(VALUE klass, VALUE str, VALUE dup)
     VALUE flags = FL_TEST_RAW(str, flag_mask);
     int encidx = 0;
     if (STR_EMBED_P(str)) {
-        long len = RSTRING_EMBED_LEN(str);
+        long len = RSTRING_LEN(str);
 
         assert(STR_EMBED_P(dup));
         assert(str_embed_capa(dup) >= len + 1);
-        STR_SET_EMBED_LEN(dup, len);
         MEMCPY(RSTRING(dup)->as.embed.ary, RSTRING(str)->as.embed.ary, char, len + 1);
     }
     else {
@@ -1728,12 +1718,13 @@ str_duplicate_setup(VALUE klass, VALUE str, VALUE dup)
         assert(!STR_SHARED_P(root));
         assert(RB_OBJ_FROZEN_RAW(root));
 
-        RSTRING(dup)->as.heap.len = RSTRING_LEN(str);
         RSTRING(dup)->as.heap.ptr = RSTRING_PTR(str);
         FL_SET(root, STR_SHARED_ROOT);
         RB_OBJ_WRITE(dup, &RSTRING(dup)->as.heap.aux.shared, root);
         flags |= RSTRING_NOEMBED | STR_SHARED;
     }
+
+    STR_SET_LEN(dup, RSTRING_LEN(str));
 
     if ((flags & ENCODING_MASK) == (ENCODING_INLINE_MAX<<ENCODING_SHIFT)) {
         encidx = rb_enc_get_index(str);
@@ -1752,7 +1743,7 @@ ec_str_duplicate(struct rb_execution_context_struct *ec, VALUE klass, VALUE str)
         dup = ec_str_alloc_heap(ec, klass);
     }
     else {
-        dup = ec_str_alloc_embed(ec, klass, RSTRING_EMBED_LEN(str) + TERM_LEN(str));
+        dup = ec_str_alloc_embed(ec, klass, RSTRING_LEN(str) + TERM_LEN(str));
     }
 
     return str_duplicate_setup(klass, str, dup);
@@ -1766,7 +1757,7 @@ str_duplicate(VALUE klass, VALUE str)
         dup = str_alloc_heap(klass);
     }
     else {
-       dup = str_alloc_embed(klass, RSTRING_EMBED_LEN(str) + TERM_LEN(str));
+       dup = str_alloc_embed(klass, RSTRING_LEN(str) + TERM_LEN(str));
     }
 
     return str_duplicate_setup(klass, str, dup);
@@ -1842,14 +1833,14 @@ rb_str_init(int argc, VALUE *argv, VALUE str)
             str_modifiable(str);
             if (STR_EMBED_P(str)) { /* make noembed always */
                 char *new_ptr = ALLOC_N(char, (size_t)capa + termlen);
-                assert(RSTRING(str)->as.embed.len + 1 <= str_embed_capa(str));
-                memcpy(new_ptr, RSTRING(str)->as.embed.ary, RSTRING(str)->as.embed.len + 1);
+                assert(RSTRING_LEN(str) + 1 <= str_embed_capa(str));
+                memcpy(new_ptr, RSTRING(str)->as.embed.ary, RSTRING_LEN(str) + 1);
                 RSTRING(str)->as.heap.ptr = new_ptr;
             }
             else if (FL_TEST(str, STR_SHARED|STR_NOFREE)) {
                 const size_t size = (size_t)capa + termlen;
                 const char *const old_ptr = RSTRING_PTR(str);
-                const size_t osize = RSTRING(str)->as.heap.len + TERM_LEN(str);
+                const size_t osize = RSTRING_LEN(str) + TERM_LEN(str);
                 char *new_ptr = ALLOC_N(char, (size_t)capa + termlen);
                 memcpy(new_ptr, old_ptr, osize < size ? osize : size);
                 FL_UNSET_RAW(str, STR_SHARED|STR_NOFREE);
@@ -1859,7 +1850,7 @@ rb_str_init(int argc, VALUE *argv, VALUE str)
                 SIZED_REALLOC_N(RSTRING(str)->as.heap.ptr, char,
                         (size_t)capa + termlen, STR_HEAP_SIZE(str));
             }
-            RSTRING(str)->as.heap.len = len;
+            STR_SET_LEN(str, len);
             TERM_FILL(&RSTRING(str)->as.heap.ptr[len], termlen);
             if (n == 1) {
                 memcpy(RSTRING(str)->as.heap.ptr, RSTRING_PTR(orig), len);
@@ -2351,7 +2342,7 @@ str_make_independent_expand(VALUE str, long len, long expand, const int termlen)
         STR_SET_EMBED(str);
         memcpy(RSTRING(str)->as.embed.ary, ptr, len);
         TERM_FILL(RSTRING(str)->as.embed.ary + len, termlen);
-        STR_SET_EMBED_LEN(str, len);
+        STR_SET_LEN(str, len);
         return;
     }
 
@@ -2367,7 +2358,7 @@ str_make_independent_expand(VALUE str, long len, long expand, const int termlen)
     FL_UNSET(str, STR_SHARED|STR_NOFREE);
     TERM_FILL(ptr + len, termlen);
     RSTRING(str)->as.heap.ptr = ptr;
-    RSTRING(str)->as.heap.len = len;
+    STR_SET_LEN(str, len);
     RSTRING(str)->as.heap.aux.capa = capa;
 }
 
@@ -2419,7 +2410,7 @@ str_discard(VALUE str)
     if (!STR_EMBED_P(str) && !FL_TEST(str, STR_SHARED|STR_NOFREE)) {
         ruby_sized_xfree(STR_HEAP_PTR(str), STR_HEAP_SIZE(str));
         RSTRING(str)->as.heap.ptr = 0;
-        RSTRING(str)->as.heap.len = 0;
+        STR_SET_LEN(str, 0);
     }
 }
 
@@ -2741,19 +2732,34 @@ str_subseq(VALUE str, long beg, long len)
 {
     VALUE str2;
 
-    const long rstring_embed_capa_max = ((sizeof(struct RString) - offsetof(struct RString, as.embed.ary)) / sizeof(char)) - 1;
+    assert(beg >= 0);
+    assert(len >= 0);
+    assert(beg+len <= RSTRING_LEN(str));
 
-    if (!SHARABLE_SUBSTRING_P(beg, len, RSTRING_LEN(str)) ||
-            len <= rstring_embed_capa_max) {
+    const int termlen = TERM_LEN(str);
+    if (!SHARABLE_SUBSTRING_P(beg, len, RSTRING_LEN(str))) {
         str2 = rb_str_new(RSTRING_PTR(str) + beg, len);
+        RB_GC_GUARD(str);
+        return str2;
+    }
+
+    str2 = str_alloc_heap(rb_cString);
+    if (str_embed_capa(str2) >= len + termlen) {
+        char *ptr2 = RSTRING(str2)->as.embed.ary;
+        STR_SET_EMBED(str2);
+        memcpy(ptr2, RSTRING_PTR(str) + beg, len);
+        TERM_FILL(ptr2+len, termlen);
+
+        STR_SET_LEN(str2, len);
         RB_GC_GUARD(str);
     }
     else {
-        str2 = str_new_shared(rb_cString, str);
+        str_replace_shared(str2, str);
+        assert(!STR_EMBED_P(str2));
         ENC_CODERANGE_CLEAR(str2);
         RSTRING(str2)->as.heap.ptr += beg;
-        if (RSTRING(str2)->as.heap.len > len) {
-            RSTRING(str2)->as.heap.len = len;
+        if (RSTRING_LEN(str2) > len) {
+            STR_SET_LEN(str2, len);
         }
     }
 
@@ -3002,7 +3008,7 @@ rb_str_resize(VALUE str, long len)
         if (STR_EMBED_P(str)) {
             if (len == slen) return str;
             if (str_embed_capa(str) >= len + termlen) {
-                STR_SET_EMBED_LEN(str, len);
+                STR_SET_LEN(str, len);
                 TERM_FILL(RSTRING(str)->as.embed.ary + len, termlen);
                 return str;
             }
@@ -3014,7 +3020,7 @@ rb_str_resize(VALUE str, long len)
             if (slen > len) slen = len;
             if (slen > 0) MEMCPY(RSTRING(str)->as.embed.ary, ptr, char, slen);
             TERM_FILL(RSTRING(str)->as.embed.ary + len, termlen);
-            STR_SET_EMBED_LEN(str, len);
+            STR_SET_LEN(str, len);
             if (independent) ruby_xfree(ptr);
             return str;
         }
@@ -3029,7 +3035,7 @@ rb_str_resize(VALUE str, long len)
             RSTRING(str)->as.heap.aux.capa = len;
         }
         else if (len == slen) return str;
-        RSTRING(str)->as.heap.len = len;
+        STR_SET_LEN(str, len);
         TERM_FILL(RSTRING(str)->as.heap.ptr + len, termlen); /* sentinel */
     }
     return str;
@@ -3046,7 +3052,7 @@ str_buf_cat4(VALUE str, const char *ptr, long len, bool keep_cr)
     }
     if (len == 0) return 0;
 
-    long capa, total, olen, off = -1;
+    long total, olen, off = -1;
     char *sptr;
     const int termlen = TERM_LEN(str);
 
@@ -3055,16 +3061,8 @@ str_buf_cat4(VALUE str, const char *ptr, long len, bool keep_cr)
         off = ptr - sptr;
     }
 
-    if (STR_EMBED_P(str)) {
-        capa = str_embed_capa(str) - termlen;
-        sptr = RSTRING(str)->as.embed.ary;
-        olen = RSTRING_EMBED_LEN(str);
-    }
-    else {
-        capa = RSTRING(str)->as.heap.aux.capa;
-        sptr = RSTRING(str)->as.heap.ptr;
-        olen = RSTRING(str)->as.heap.len;
-    }
+    long capa = str_capacity(str, termlen);
+
     if (olen > LONG_MAX - len) {
         rb_raise(rb_eArgError, "string sizes too big");
     }
@@ -3824,7 +3822,9 @@ strseq_core(const char *str_ptr, const char *str_ptr_end, long str_len,
     return pos + offset;
 }
 
+/* found index in byte */
 #define rb_str_index(str, sub, offset) rb_strseq_index(str, sub, offset, 0)
+#define rb_str_byteindex(str, sub, offset) rb_strseq_index(str, sub, offset, 1)
 
 static long
 rb_strseq_index(VALUE str, VALUE sub, long offset, int in_byte)
@@ -3878,34 +3878,28 @@ rb_str_index_m(int argc, VALUE *argv, VALUE str)
 {
     VALUE sub;
     VALUE initpos;
+    rb_encoding *enc = STR_ENC_GET(str);
     long pos;
 
     if (rb_scan_args(argc, argv, "11", &sub, &initpos) == 2) {
+        long slen = str_strlen(str, enc); /* str's enc */
         pos = NUM2LONG(initpos);
-    }
-    else {
-        pos = 0;
-    }
-    if (pos < 0) {
-        pos += str_strlen(str, NULL);
-        if (pos < 0) {
+        if (pos < 0 ? (pos += slen) < 0 : pos > slen) {
             if (RB_TYPE_P(sub, T_REGEXP)) {
                 rb_backref_set(Qnil);
             }
             return Qnil;
         }
     }
+    else {
+        pos = 0;
+    }
 
     if (RB_TYPE_P(sub, T_REGEXP)) {
-        if (pos > str_strlen(str, NULL))
-            return Qnil;
         pos = str_offset(RSTRING_PTR(str), RSTRING_END(str), pos,
-                         rb_enc_check(str, sub), single_byte_optimizable(str));
+                         enc, single_byte_optimizable(str));
 
-        if (rb_reg_search(sub, str, pos, 0) < 0) {
-            return Qnil;
-        }
-        else {
+        if (rb_reg_search(sub, str, pos, 0) >= 0) {
             VALUE match = rb_backref_get();
             struct re_registers *regs = RMATCH_REGS(match);
             pos = rb_str_sublen(str, BEG(0));
@@ -3915,25 +3909,29 @@ rb_str_index_m(int argc, VALUE *argv, VALUE str)
     else {
         StringValue(sub);
         pos = rb_str_index(str, sub, pos);
-        pos = rb_str_sublen(str, pos);
+        if (pos >= 0) {
+            pos = rb_str_sublen(str, pos);
+            return LONG2NUM(pos);
+        }
     }
-
-    if (pos == -1) return Qnil;
-    return LONG2NUM(pos);
+    return Qnil;
 }
 
-/* whether given pos is valid character boundary or not
+/* Ensure that the given pos is a valid character boundary.
  * Note that in this function, "character" means a code point
  * (Unicode scalar value), not a grapheme cluster.
  */
-static bool
-str_check_byte_pos(VALUE str, long pos)
+static void
+str_ensure_byte_pos(VALUE str, long pos)
 {
     const char *s = RSTRING_PTR(str);
     const char *e = RSTRING_END(str);
     const char *p = s + pos;
     const char *pp = rb_enc_left_char_head(s, p, e, rb_enc_get(str));
-    return p == pp;
+    if (p != pp) {
+        rb_raise(rb_eIndexError,
+                 "offset %ld does not land on character boundary", pos);
+    }
 }
 
 /*
@@ -3985,33 +3983,23 @@ rb_str_byteindex_m(int argc, VALUE *argv, VALUE str)
     long pos;
 
     if (rb_scan_args(argc, argv, "11", &sub, &initpos) == 2) {
+        long slen = RSTRING_LEN(str);
         pos = NUM2LONG(initpos);
-    }
-    else {
-        pos = 0;
-    }
-    if (pos < 0) {
-        pos += RSTRING_LEN(str);
-        if (pos < 0) {
+        if (pos < 0 ? (pos += slen) < 0 : pos > slen) {
             if (RB_TYPE_P(sub, T_REGEXP)) {
                 rb_backref_set(Qnil);
             }
             return Qnil;
         }
     }
-
-    if (!str_check_byte_pos(str, pos)) {
-        rb_raise(rb_eIndexError,
-                 "offset %ld does not land on character boundary", pos);
+    else {
+        pos = 0;
     }
 
+    str_ensure_byte_pos(str, pos);
+
     if (RB_TYPE_P(sub, T_REGEXP)) {
-        if (pos > RSTRING_LEN(str))
-            return Qnil;
-        if (rb_reg_search(sub, str, pos, 0) < 0) {
-            return Qnil;
-        }
-        else {
+        if (rb_reg_search(sub, str, pos, 0) >= 0) {
             VALUE match = rb_backref_get();
             struct re_registers *regs = RMATCH_REGS(match);
             pos = BEG(0);
@@ -4020,11 +4008,10 @@ rb_str_byteindex_m(int argc, VALUE *argv, VALUE str)
     }
     else {
         StringValue(sub);
-        pos = rb_strseq_index(str, sub, pos, 1);
+        pos = rb_str_byteindex(str, sub, pos);
+        if (pos >= 0) return LONG2NUM(pos);
     }
-
-    if (pos == -1) return Qnil;
-    return LONG2NUM(pos);
+    return Qnil;
 }
 
 #ifdef HAVE_MEMRCHR
@@ -4083,6 +4070,7 @@ str_rindex(VALUE str, VALUE sub, const char *s, rb_encoding *enc)
 }
 #endif
 
+/* found index in byte */
 static long
 rb_str_rindex(VALUE str, VALUE sub, long pos)
 {
@@ -4112,7 +4100,7 @@ rb_str_rindex(VALUE str, VALUE sub, long pos)
     }
 
     s = str_nth(sbeg, RSTRING_END(str), pos, enc, singlebyte);
-    return rb_str_sublen(str, str_rindex(str, sub, s, enc));
+    return str_rindex(str, sub, s, enc);
 }
 
 /*
@@ -4176,20 +4164,17 @@ static VALUE
 rb_str_rindex_m(int argc, VALUE *argv, VALUE str)
 {
     VALUE sub;
-    VALUE vpos;
+    VALUE initpos;
     rb_encoding *enc = STR_ENC_GET(str);
     long pos, len = str_strlen(str, enc); /* str's enc */
 
-    if (rb_scan_args(argc, argv, "11", &sub, &vpos) == 2) {
-        pos = NUM2LONG(vpos);
-        if (pos < 0) {
-            pos += len;
-            if (pos < 0) {
-                if (RB_TYPE_P(sub, T_REGEXP)) {
-                    rb_backref_set(Qnil);
-                }
-                return Qnil;
+    if (rb_scan_args(argc, argv, "11", &sub, &initpos) == 2) {
+        pos = NUM2LONG(initpos);
+        if (pos < 0 && (pos += len) < 0) {
+            if (RB_TYPE_P(sub, T_REGEXP)) {
+                rb_backref_set(Qnil);
             }
+            return Qnil;
         }
         if (pos > len) pos = len;
     }
@@ -4198,7 +4183,7 @@ rb_str_rindex_m(int argc, VALUE *argv, VALUE str)
     }
 
     if (RB_TYPE_P(sub, T_REGEXP)) {
-        /* enc = rb_get_check(str, sub); */
+        /* enc = rb_enc_check(str, sub); */
         pos = str_offset(RSTRING_PTR(str), RSTRING_END(str), pos,
                          enc, single_byte_optimizable(str));
 
@@ -4212,7 +4197,10 @@ rb_str_rindex_m(int argc, VALUE *argv, VALUE str)
     else {
         StringValue(sub);
         pos = rb_str_rindex(str, sub, pos);
-        if (pos >= 0) return LONG2NUM(pos);
+        if (pos >= 0) {
+            pos = rb_str_sublen(str, pos);
+            return LONG2NUM(pos);
+        }
     }
     return Qnil;
 }
@@ -4312,19 +4300,16 @@ static VALUE
 rb_str_byterindex_m(int argc, VALUE *argv, VALUE str)
 {
     VALUE sub;
-    VALUE vpos;
+    VALUE initpos;
     long pos, len = RSTRING_LEN(str);
 
-    if (rb_scan_args(argc, argv, "11", &sub, &vpos) == 2) {
-        pos = NUM2LONG(vpos);
-        if (pos < 0) {
-            pos += len;
-            if (pos < 0) {
-                if (RB_TYPE_P(sub, T_REGEXP)) {
-                    rb_backref_set(Qnil);
-                }
-                return Qnil;
+    if (rb_scan_args(argc, argv, "11", &sub, &initpos) == 2) {
+        pos = NUM2LONG(initpos);
+        if (pos < 0 && (pos += len) < 0) {
+            if (RB_TYPE_P(sub, T_REGEXP)) {
+                rb_backref_set(Qnil);
             }
+            return Qnil;
         }
         if (pos > len) pos = len;
     }
@@ -4332,10 +4317,7 @@ rb_str_byterindex_m(int argc, VALUE *argv, VALUE str)
         pos = len;
     }
 
-    if (!str_check_byte_pos(str, pos)) {
-        rb_raise(rb_eIndexError,
-                 "offset %ld does not land on character boundary", pos);
-    }
+    str_ensure_byte_pos(str, pos);
 
     if (RB_TYPE_P(sub, T_REGEXP)) {
         if (rb_reg_search(sub, str, pos, 1) >= 0) {
@@ -4365,7 +4347,7 @@ rb_str_byterindex_m(int argc, VALUE *argv, VALUE str)
  *    'foo' =~ /o/ # => 1
  *    'foo' =~ /x/ # => nil
  *
- *  Note: also updates Regexp@Special+global+variables.
+ *  Note: also updates Regexp@Global+Variables.
  *
  *  If the given +object+ is not a \Regexp, returns the value
  *  returned by <tt>object =~ self</tt>.
@@ -4407,7 +4389,7 @@ static VALUE get_pat(VALUE);
  *
  *  Returns a \MatchData object (or +nil+) based on +self+ and the given +pattern+.
  *
- *  Note: also updates Regexp@Special+global+variables.
+ *  Note: also updates Regexp@Global+Variables.
  *
  *  - Computes +regexp+ by converting +pattern+ (if not already a \Regexp).
  *      regexp = Regexp.new(pattern)
@@ -4456,7 +4438,7 @@ rb_str_match_m(int argc, VALUE *argv, VALUE str)
  *
  *  Returns +true+ or +false+ based on whether a match is found for +self+ and +pattern+.
  *
- *  Note: does not update Regexp@Special+global+variables.
+ *  Note: does not update Regexp@Global+Variables.
  *
  *  Computes +regexp+ by converting +pattern+ (if not already a \Regexp).
  *    regexp = Regexp.new(pattern)
@@ -5167,7 +5149,6 @@ rb_str_drop_bytes(VALUE str, long len)
         char *oldptr = ptr;
         int fl = (int)(RBASIC(str)->flags & (STR_NOEMBED|STR_SHARED|STR_NOFREE));
         STR_SET_EMBED(str);
-        STR_SET_EMBED_LEN(str, nlen);
         ptr = RSTRING(str)->as.embed.ary;
         memmove(ptr, oldptr + len, nlen);
         if (fl == STR_NOEMBED) xfree(oldptr);
@@ -5179,9 +5160,12 @@ rb_str_drop_bytes(VALUE str, long len)
             OBJ_FREEZE(shared);
         }
         ptr = RSTRING(str)->as.heap.ptr += len;
-        RSTRING(str)->as.heap.len = nlen;
     }
-    ptr[nlen] = 0;
+    STR_SET_LEN(str, nlen);
+
+    if (!SHARABLE_MIDDLE_SUBSTRING) {
+        TERM_FILL(ptr + nlen, TERM_LEN(str));
+    }
     ENC_CODERANGE_CLEAR(str);
     return str;
 }
@@ -5583,7 +5567,7 @@ static long
 rb_pat_search(VALUE pat, VALUE str, long pos, int set_backref_str)
 {
     if (BUILTIN_TYPE(pat) == T_STRING) {
-        pos = rb_strseq_index(str, pat, pos, 1);
+        pos = rb_str_byteindex(str, pat, pos);
         if (set_backref_str) {
             if (pos >= 0) {
                 str = rb_str_new_frozen_String(str);
@@ -5955,7 +5939,7 @@ rb_str_clear(VALUE str)
 {
     str_discard(str);
     STR_SET_EMBED(str);
-    STR_SET_EMBED_LEN(str, 0);
+    STR_SET_LEN(str, 0);
     RSTRING_PTR(str)[0] = 0;
     if (rb_enc_asciicompat(STR_ENC_GET(str)))
         ENC_CODERANGE_SET(str, ENC_CODERANGE_7BIT);
@@ -6213,14 +6197,8 @@ str_check_beg_len(VALUE str, long *beg, long *len)
         *len = slen - *beg;
     }
     end = *beg + *len;
-    if (!str_check_byte_pos(str, *beg)) {
-        rb_raise(rb_eIndexError,
-                 "offset %ld does not land on character boundary", *beg);
-    }
-    if (!str_check_byte_pos(str, end)) {
-        rb_raise(rb_eIndexError,
-                 "offset %ld does not land on character boundary", end);
-    }
+    str_ensure_byte_pos(str, *beg);
+    str_ensure_byte_pos(str, end);
 }
 
 /*
@@ -7753,8 +7731,10 @@ trnext(struct tr *t, rb_encoding *enc)
                         }
                         continue; /* not reached */
                     }
-                    t->gen = 1;
-                    t->max = c;
+                    else if (t->now < c) {
+                        t->gen = 1;
+                        t->max = c;
+                    }
                 }
             }
             return t->now;
@@ -7935,7 +7915,7 @@ tr_trans(VALUE str, VALUE src, VALUE repl, int sflag)
         }
         TERM_FILL((char *)t, termlen);
         RSTRING(str)->as.heap.ptr = (char *)buf;
-        RSTRING(str)->as.heap.len = t - buf;
+        STR_SET_LEN(str, t - buf);
         STR_SET_NOEMBED(str);
         RSTRING(str)->as.heap.aux.capa = max;
     }
@@ -8011,7 +7991,7 @@ tr_trans(VALUE str, VALUE src, VALUE repl, int sflag)
         }
         TERM_FILL((char *)t, termlen);
         RSTRING(str)->as.heap.ptr = (char *)buf;
-        RSTRING(str)->as.heap.len = t - buf;
+        STR_SET_LEN(str, t - buf);
         STR_SET_NOEMBED(str);
         RSTRING(str)->as.heap.aux.capa = max;
     }
@@ -8679,7 +8659,6 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
 
 #define SPLIT_STR(beg, len) (empty_count = split_string(result, str, beg, len, empty_count))
 
-    if (result) result = rb_ary_new();
     beg = 0;
     char *ptr = RSTRING_PTR(str);
     char *eptr = RSTRING_END(str);
@@ -8688,6 +8667,7 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
         int skip = 1;
         unsigned int c;
 
+        if (result) result = rb_ary_new();
         end = beg;
         if (is_ascii_string(str)) {
             while (ptr < eptr) {
@@ -8747,6 +8727,7 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
         char *sptr = RSTRING_PTR(spat);
         long slen = RSTRING_LEN(spat);
 
+        if (result) result = rb_ary_new();
         mustnot_broken(str);
         enc = rb_enc_check(str, spat);
         while (ptr < eptr &&
@@ -8768,6 +8749,7 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
         char *str_start = ptr;
         int n;
 
+        if (result) result = rb_ary_new_capa(RSTRING_LEN(str));
         mustnot_broken(str);
         enc = rb_enc_get(str);
         while (ptr < eptr &&
@@ -8779,6 +8761,7 @@ rb_str_split_m(int argc, VALUE *argv, VALUE str)
         beg = ptr - str_start;
     }
     else {
+        if (result) result = rb_ary_new();
         long len = RSTRING_LEN(str);
         long start = beg;
         long idx;
@@ -10446,7 +10429,6 @@ rb_str_rpartition(VALUE str, VALUE sep)
         if (pos < 0) {
             goto failed;
         }
-        pos = rb_str_offset(str, pos);
     }
 
     return rb_ary_new3(3, rb_str_subseq(str, 0, pos),
@@ -10731,7 +10713,7 @@ rb_str_b(VALUE str)
         str2 = str_alloc_heap(rb_cString);
     }
     else {
-        str2 = str_alloc_embed(rb_cString, RSTRING_EMBED_LEN(str) + TERM_LEN(str));
+        str2 = str_alloc_embed(rb_cString, RSTRING_LEN(str) + TERM_LEN(str));
     }
     str_replace_shared_without_enc(str2, str);
 

@@ -1757,6 +1757,9 @@ DEFINE_ENUMFUNCS(all)
  *
  *  Returns whether every element meets a given criterion.
  *
+ *  If +self+ has no element, returns +true+ and argument or block
+ *  are not used.
+ *
  *  With no argument and no block,
  *  returns whether every element is truthy:
  *
@@ -1818,6 +1821,9 @@ DEFINE_ENUMFUNCS(any)
  *
  *  Returns whether any element meets a given criterion.
  *
+ *  If +self+ has no element, returns +false+ and argument or block
+ *  are not used.
+ *
  *  With no argument and no block,
  *  returns whether any element is truthy:
  *
@@ -1847,7 +1853,6 @@ DEFINE_ENUMFUNCS(any)
  *    (1..4).any? {|element| element < 1 }                    # => false
  *    {foo: 0, bar: 1, baz: 2}.any? {|key, value| value < 1 } # => true
  *    {foo: 0, bar: 1, baz: 2}.any? {|key, value| value < 0 } # => false
- *
  *
  *  Related: #all?, #none?, #one?.
  */
@@ -4819,13 +4824,13 @@ uniq_iter(RB_BLOCK_CALL_FUNC_ARGLIST(i, hash))
  *    %w[a b c c b a a b c].uniq       # => ["a", "b", "c"]
  *    [0, 1, 2, 2, 1, 0, 0, 1, 2].uniq # => [0, 1, 2]
  *
- *  With a block, returns a new array containing only for which the block
+ *  With a block, returns a new array containing elements only for which the block
  *  returns a unique value:
  *
  *    a = [0, 1, 2, 3, 4, 5, 5, 4, 3, 2, 1]
  *    a.uniq {|i| i.even? ? i : 0 } # => [0, 2, 4]
  *    a = %w[a b c d e e d c b a a b c d e]
-      a.uniq {|c| c < 'c' }         # => ["a", "c"]
+ *    a.uniq {|c| c < 'c' }         # => ["a", "c"]
  *
  */
 

@@ -417,7 +417,7 @@ impl RegTemps {
 /// Code generation context
 /// Contains information we can use to specialize/optimize code
 /// There are a lot of context objects so we try to keep the size small.
-#[derive(Clone, Copy, Default, Eq, Hash, PartialEq, Debug)]
+#[derive(Clone, Default, Eq, Hash, PartialEq, Debug)]
 pub struct Context {
     // Number of values currently on the temporary stack
     stack_size: u8,
@@ -474,6 +474,7 @@ pub enum BranchGenFn {
     JNZToTarget0,
     JZToTarget0,
     JBEToTarget0,
+    JBToTarget0,
     JITReturn,
 }
 
@@ -527,6 +528,9 @@ impl BranchGenFn {
             BranchGenFn::JBEToTarget0 => {
                 asm.jbe(target0)
             }
+            BranchGenFn::JBToTarget0 => {
+                asm.jb(target0)
+            }
             BranchGenFn::JITReturn => {
                 asm.comment("update cfp->jit_return");
                 asm.mov(Opnd::mem(64, CFP, RUBY_OFFSET_CFP_JIT_RETURN), Opnd::const_ptr(target0.unwrap_code_ptr().raw_ptr()));
@@ -543,6 +547,7 @@ impl BranchGenFn {
             BranchGenFn::JNZToTarget0 |
             BranchGenFn::JZToTarget0 |
             BranchGenFn::JBEToTarget0 |
+            BranchGenFn::JBToTarget0 |
             BranchGenFn::JITReturn => BranchShape::Default,
         }
     }
@@ -563,6 +568,7 @@ impl BranchGenFn {
             BranchGenFn::JNZToTarget0 |
             BranchGenFn::JZToTarget0 |
             BranchGenFn::JBEToTarget0 |
+            BranchGenFn::JBToTarget0 |
             BranchGenFn::JITReturn => {
                 assert_eq!(new_shape, BranchShape::Default);
             }
@@ -1103,7 +1109,7 @@ pub extern "C" fn rb_yjit_iseq_free(payload: *mut c_void) {
     incr_counter!(freed_iseq_count);
 }
 
-/// GC callback for marking GC objects in the the per-iseq payload.
+/// GC callback for marking GC objects in the per-iseq payload.
 #[no_mangle]
 pub extern "C" fn rb_yjit_iseq_mark(payload: *mut c_void) {
     let payload = if payload.is_null() {
@@ -1166,7 +1172,7 @@ pub extern "C" fn rb_yjit_iseq_mark(payload: *mut c_void) {
     }
 }
 
-/// GC callback for updating GC objects in the the per-iseq payload.
+/// GC callback for updating GC objects in the per-iseq payload.
 /// This is a mirror of [rb_yjit_iseq_mark].
 #[no_mangle]
 pub extern "C" fn rb_yjit_iseq_update_references(payload: *mut c_void) {
@@ -1565,6 +1571,10 @@ impl Block {
 impl Context {
     pub fn get_stack_size(&self) -> u8 {
         self.stack_size
+    }
+
+    pub fn set_stack_size(&mut self, stack_size: u8) {
+        self.stack_size = stack_size;
     }
 
     /// Create a new Context that is compatible with self but doesn't have type information.
@@ -2125,11 +2135,17 @@ fn gen_block_series_body(
 
 /// Generate a block version that is an entry point inserted into an iseq
 /// NOTE: this function assumes that the VM lock has been taken
-pub fn gen_entry_point(iseq: IseqPtr, ec: EcPtr) -> Option<CodePtr> {
+/// If jit_exception is true, compile JIT code for handling exceptions.
+/// See [jit_compile_exception] for details.
+pub fn gen_entry_point(iseq: IseqPtr, ec: EcPtr, jit_exception: bool) -> Option<CodePtr> {
     // Compute the current instruction index based on the current PC
+    let cfp = unsafe { get_ec_cfp(ec) };
     let insn_idx: u16 = unsafe {
-        let ec_pc = get_cfp_pc(get_ec_cfp(ec));
+        let ec_pc = get_cfp_pc(cfp);
         iseq_pc_to_insn_idx(iseq, ec_pc)?
+    };
+    let stack_size: u8 = unsafe {
+        u8::try_from(get_cfp_sp(cfp).offset_from(get_cfp_bp(cfp))).ok()?
     };
 
     // The entry context makes no assumptions about types
@@ -2143,10 +2159,12 @@ pub fn gen_entry_point(iseq: IseqPtr, ec: EcPtr) -> Option<CodePtr> {
     let ocb = CodegenGlobals::get_outlined_cb();
 
     // Write the interpreter entry prologue. Might be NULL when out of memory.
-    let code_ptr = gen_entry_prologue(cb, ocb, iseq, insn_idx);
+    let code_ptr = gen_entry_prologue(cb, ocb, iseq, insn_idx, jit_exception);
 
     // Try to generate code for the entry block
-    let block = gen_block_series(blockid, &Context::default(), ec, cb, ocb);
+    let mut ctx = Context::default();
+    ctx.stack_size = stack_size;
+    let block = gen_block_series(blockid, &ctx, ec, cb, ocb);
 
     cb.mark_all_executable();
     ocb.unwrap().mark_all_executable();
@@ -2167,6 +2185,9 @@ pub fn gen_entry_point(iseq: IseqPtr, ec: EcPtr) -> Option<CodePtr> {
             }
         }
     }
+
+    // Count the number of entry points we compile
+    incr_counter!(compiled_iseq_entry);
 
     // Compilation successful and block not empty
     return code_ptr;
@@ -2226,6 +2247,9 @@ fn entry_stub_hit_body(entry_ptr: *const c_void, ec: EcPtr) -> Option<*const u8>
     let cfp = unsafe { get_ec_cfp(ec) };
     let iseq = unsafe { get_cfp_iseq(cfp) };
     let insn_idx = iseq_pc_to_insn_idx(iseq, unsafe { get_cfp_pc(cfp) })?;
+    let stack_size: u8 = unsafe {
+        u8::try_from(get_cfp_sp(cfp).offset_from(get_cfp_bp(cfp))).ok()?
+    };
 
     let cb = CodegenGlobals::get_inline_cb();
     let ocb = CodegenGlobals::get_outlined_cb();
@@ -2238,7 +2262,8 @@ fn entry_stub_hit_body(entry_ptr: *const c_void, ec: EcPtr) -> Option<*const u8>
 
     // Try to find an existing compiled version of this block
     let blockid = BlockId { iseq, idx: insn_idx };
-    let ctx = Context::default();
+    let mut ctx = Context::default();
+    ctx.stack_size = stack_size;
     let blockref = match find_block_version(blockid, &ctx) {
         // If an existing block is found, generate a jump to the block.
         Some(blockref) => {
@@ -2951,7 +2976,7 @@ pub fn invalidate_block_version(blockref: &BlockRef) {
     // Get a pointer to the generated code for this block
     let block_start = block.start_addr;
 
-    // Make the the start of the block do an exit. This handles OOM situations
+    // Make the start of the block do an exit. This handles OOM situations
     // and some cases where we can't efficiently patch incoming branches.
     // Do this first, since in case there is a fallthrough branch into this
     // block, the patching loop below can overwrite the start of the block.

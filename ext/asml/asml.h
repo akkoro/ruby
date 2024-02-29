@@ -9,6 +9,8 @@
 
 #include "assemblylift.h"
 #include "jwt.h"
+#include "jwt_validation_params.h"
+#include "jwt_verify_result.h"
 #include "opa.h"
 #include "opa_policy.h"
 #include "secrets.h"

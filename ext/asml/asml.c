@@ -3,7 +3,12 @@
 VALUE rb_mAsmlRt;
 VALUE rb_mAsmlIo;
 VALUE rb_mAsmlOpa;
+VALUE rb_mAsmlJwt;
 VALUE rb_cAsmlOpaPolicy;
+VALUE rb_cAsmlJwtValidationParams;
+VALUE rb_cAsmlJwtVerifyResult;
+
+extern const rb_data_type_t asml_jwt_validation_params_data_type;
 
 void c_bytes_from_value(VALUE bytes, uint8_t **ret, size_t *len) {
     Check_Type(bytes, T_ARRAY);
@@ -143,6 +148,34 @@ static VALUE rb_asml_opa_eval(VALUE self, VALUE id_s, VALUE data_s, VALUE input_
     return rb_str_new(ret.ptr, ret.len);
 }
 
+static VALUE rb_asml_jwt_decode_verify(VALUE self, VALUE token_s, VALUE jwks_s, VALUE params_c) {
+    Check_Type(token_s, T_STRING);
+    Check_Type(jwks_s, T_STRING);
+    // Check_Type(params_c, T_OBJECT);
+
+    jwt_string_t token = { .ptr = RSTRING_PTR(token_s), .len = RSTRING_LEN(token_s) };
+    jwt_string_t jwks = { .ptr = RSTRING_PTR(jwks_s), .len = RSTRING_LEN(jwks_s) };
+
+    rb_asml_jwt_validation_params_t* p;
+    TypedData_Get_Struct(params_c, rb_asml_jwt_validation_params_t, &asml_jwt_validation_params_data_type, p);
+
+    jwt_string_t iss;
+    jwt_string_t aud;
+    jwt_string_set(&iss, p->iss);
+    jwt_string_set(&aud, p->aud);
+    akkoro_jwt_decoder_validation_params_t params = { .iss = iss, .aud = aud };
+
+    akkoro_jwt_decoder_verify_result_t ret = {0};
+    akkoro_jwt_decoder_jwt_error_t err = 0;
+    if (!akkoro_jwt_decoder_decode_verify(&token, &jwks, &params, &ret, &err)) {
+        rb_raise(rb_eRuntimeError, "jwt decode error: %d", err);
+    } else {
+        VALUE args[1];
+        args[0] = ret.valid;
+        return rb_class_new_instance(1, args, rb_cAsmlJwtVerifyResult);
+    }
+}
+
 void Init_asml(void)
 {
     /* akkoro:assemblylift/asml-rt */
@@ -167,4 +200,19 @@ void Init_asml(void)
     rb_define_alloc_func(rb_cAsmlOpaPolicy, rb_asml_opa_policy_alloc);
     rb_define_method(rb_cAsmlOpaPolicy, "initialize", rb_asml_opa_policy_init, 1);
     rb_define_method(rb_cAsmlOpaPolicy, "id", rb_asml_opa_policy_id, 0);
+
+    /* akkoro:jwt/decoder */
+    rb_mAsmlJwt = rb_define_module("AsmlJwt");
+    rb_define_singleton_method(rb_mAsmlJwt, "decode_verify", rb_asml_jwt_decode_verify, 3);
+
+    rb_cAsmlJwtValidationParams = rb_define_class_under(rb_mAsmlJwt, "ValidationParams", rb_cObject);
+    rb_define_alloc_func(rb_cAsmlJwtValidationParams, rb_asml_jwt_validation_params_alloc);
+    rb_define_method(rb_cAsmlJwtValidationParams, "initialize", rb_asml_jwt_validation_params_init, 2);
+    rb_define_method(rb_cAsmlJwtValidationParams, "iss", rb_asml_jwt_validation_params_iss, 0);
+    rb_define_method(rb_cAsmlJwtValidationParams, "aud", rb_asml_jwt_validation_params_aud, 0);
+
+    rb_cAsmlJwtVerifyResult = rb_define_class_under(rb_mAsmlJwt, "VerifyResult", rb_cObject);
+    rb_define_alloc_func(rb_cAsmlJwtVerifyResult, rb_asml_jwt_verify_result_alloc);
+    rb_define_method(rb_cAsmlJwtVerifyResult, "initialize", rb_asml_jwt_verify_result_init, 1);
+    rb_define_method(rb_cAsmlJwtVerifyResult, "valid", rb_asml_jwt_verify_result_valid, 0);
 }

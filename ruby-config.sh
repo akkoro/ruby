@@ -1,0 +1,1 @@
+./configure CC=$WASI_SDK_PATH/bin/clang CXX=$WASI_SDK_PATH/bin/clang++ LDFLAGS="-Xlinker -zstack-size=16777216"  --host wasm32-unknown-wasi   --with-destdir=./ruby-wasm32-wasi --with-static-linked-ext --disable-install-rdoc --with-ext=ripper,monitor,asml,json,json/parser,json/generator
